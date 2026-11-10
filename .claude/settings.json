@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go build *)",
+      "Bash(go test *)",
+      "Bash(go vet *)",
+      "Bash(go mod tidy)",
+      "Bash(gofmt *)",
+      "Bash(make build)",
+      "Bash(make check)",
+      "Bash(make lint)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./recordings/**)",
+      "Read(./transcripts/**)",
+      "Bash(git push *)"
+    ]
+  }
+}

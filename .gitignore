@@ -1,0 +1,9 @@
+
+.env
+prompts/*
+!prompts/example.*
+recordings/
+transcripts/
+bin/
+*.test
+.claude/settings.local.json
