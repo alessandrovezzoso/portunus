@@ -81,13 +81,15 @@ Each call runs three goroutines, all cancelled by a shared context:
 1. **inbound**: RTP read → G.711 decode → resample → VAD and STT.
 2. **outbound pacer**: a 20 ms ticker that writes exactly one frame per tick.
 3. **orchestrator** (`internal/call`): the turn state machine (listening → thinking →
-   speaking), barge-in, silence timeout and maximum call time.
+   speaking), barge-in, silence timeout, maximum call time and maximum turns.
 
 One turn: VAD end of speech → STT final transcript → Claude streaming reply → sentence
 splitter → speech sanitizer → TTS stream → resample → G.711 encode → pacer buffer.
 
 The Claude model is set in config (`PORTUNUS_LLM_MODEL`) and is never hardcoded anywhere
-else. Default to a fast Haiku-class model: on the phone, latency beats eloquence.
+else. Default to a fast Haiku-class model: on the phone, latency beats eloquence. The
+system prompt is fixed, so it is sent with prompt caching; nothing that changes per call
+(the time, the caller number) may sit before the cache breakpoint.
 Conversation state lives in memory, one per call, and is discarded after notify. Nothing is
 remembered across calls.
 
@@ -193,11 +195,25 @@ WAV next to choppy audio at the handset moves the fault to RTP delivery or the p
   - Recordings and transcripts are opt-in: an empty directory setting disables them.
   - Transcript text and audio never go into logs.
   - Caller numbers are masked at info level (`***123`) and appear in full only at debug.
-- **Cost ceilings are features, not niceties.**
-  - `PORTUNUS_MAX_CALL_TIME` limits the length of a call.
+- **Cost ceilings are features, not niceties.** The Messages API is stateless, so every turn
+  resends the whole conversation and a long call costs more per turn. The real risk is not a
+  normal call but one that never ends: an open line, an answering machine, or the assistant
+  transcribing and answering its own echo. STT and TTS bill by time or characters, so the
+  main ceilings bound time and turns, not only tokens. They are layered:
+  - Per reply: a small `max_tokens`. Phone replies are short.
+  - Per call: `PORTUNUS_MAX_CALL_TIME` limits the length of a call, and `PORTUNUS_MAX_TURNS`
+    limits its turns, which stops an echo loop long before the time limit.
   - `PORTUNUS_MAX_CONCURRENT_CALLS` limits parallel calls. Beyond it, answer
     `486 Busy Here` and let the S20 forward the call.
   - The S20's own Max Call Duration on the extension is a second ceiling.
+  - Per account: a spend limit in the Anthropic Console, on a workspace and API key used only
+    by Portunus.
+  - A ceiling ends the call gracefully: a short closing line, then BYE, never a cut
+    mid-sentence. The message taken so far is still delivered.
+  - If the API reports exhausted credit or quota, Portunus stops answering, so the S20 sends
+    calls to its fallback instead of to a mute assistant.
+  - The end-of-call log reports the tokens used (input, output, cache reads), so cost can be
+    read per call.
 - **The repository is public.** Never commit the office's real IP addresses, phone numbers,
   extension numbers, company names, or the real prompt. Examples use documentation addresses
   (`192.0.2.0/24`). These are gitignored: `.env`, `prompts/*` except `prompts/example.*`,
@@ -220,7 +236,9 @@ Each early milestone stays available as a diagnostic mode (`PORTUNUS_MODE`, or `
 | `listen` | VAD + STT: transcripts in the log, the assistant stays silent | STT           |
 | `agent`  | the full conversation                                         | STT, LLM, TTS |
 
-After `agent` come barge-in and timeouts, then notify, then deployment. Always prove `echo`
+The cost ceilings (`max_tokens`, `PORTUNUS_MAX_CALL_TIME`, `PORTUNUS_MAX_TURNS`) ship with
+`agent` itself: no real conversation runs without them, not even a test call. After `agent`
+come barge-in and the silence timeout, then notify, then deployment. Always prove `echo`
 first. When debugging anything audio-related, drop to the lowest mode that reproduces the
 fault before suspecting a provider.
 
