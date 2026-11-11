@@ -153,6 +153,21 @@ remembered across calls.
   first.
 - `diago.AudioStereoRecordingWav` contains a mutex and must never be copied. `go vet`
   catches this.
+- **diago answers only SDP offers with a single `m=` line.** It counts every `m=` line,
+  whatever its type, and rejects the offer with `more than 1 media line for type "audio"`.
+  An S20 offer with `m=audio` plus `m=video` therefore cannot be answered, so the S20's video
+  codecs must stay disabled (see the Yeastar notes). The correct fix, answering the extra
+  lines with port 0 as RFC 3264 requires, needs a patch to diago. It is deferred: upstream
+  `main` has the same limit, and no upstream issue reports it.
+- **diago answers `NOTIFY` outside a dialog with `481`.** The S20 sends an unsolicited
+  `Event: message-summary` NOTIFY (voicemail state) about every 30 s, so `internal/sip`
+  answers those with `200 OK` in a request middleware before diago sees them.
+- **diago hangs up an unanswered call with `480`,** which the S20 announces to the caller as
+  "extension not available". `internal/sip` refuses calls with `486` instead, so the S20's
+  When Busy forward sends the caller to voicemail.
+- **Known log noise is demoted to debug** (`libNoise` in `internal/sip`): the S20's RTCP
+  receiver reports carry SSRC 1 instead of ours, and duplicate responses can arrive after a
+  transaction has ended at shutdown. Neither affects calls.
 
 ## Diagnostics: logs, not transcripts
 
@@ -269,13 +284,21 @@ fault before suspecting a provider.
   The auth user defaults to the extension number when empty.
 - **Codecs.** On the S-Series, codecs are set globally, not per extension. PCMA/PCMU must be
   enabled there, because Portunus's SDP answer accepts G.711 only.
+  - The video codecs (H.264, H.261, H.263, H.263p) must be **disabled**: with any of them
+    enabled, the S20 adds an `m=video` line that diago cannot answer, and every call fails.
+    This applies to every extension, so it only fits an office that makes no video calls.
+  - The S20 offers PCMU first, so calls negotiate PCMU. Either G.711 law is fine.
+  - The README's S20 setup section must state the video requirement when it is written.
 - **Extension settings:**
   - IP Restriction limited to the Portunus host.
   - No outbound routes.
   - DTMF Mode RFC4733 (RFC2833).
   - Qualify can stay on.
-- **Fallback:** forward No Answer and When Busy to voicemail. Verify it by stopping Portunus
-  and calling the extension.
+- **Fallback:** forward No Answer and When Busy to voicemail. Verify both paths:
+  - stop Portunus and call the extension: voicemail answers with its "not available"
+    greeting;
+  - set `PORTUNUS_MAX_CONCURRENT_CALLS=1` and place two calls: the second gets `486`, and
+    voicemail answers with its "on the phone" greeting.
 - **Ring delay.** `PORTUNUS_RING_DELAY` defaults to `0`, because the S20 already decides
   when a call reaches Portunus.
 

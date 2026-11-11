@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
@@ -66,12 +67,15 @@ func (s *Server) handleInvite(ctx context.Context, d *diago.DialogServerSession,
 	// The concurrency check comes before anything else, so a call beyond the
 	// limit is refused before it starts ringing and the S20 can forward it.
 	// A call that arrives while shutting down is refused the same way.
-	if ctx.Err() != nil || !s.admit() {
+	switch {
+	case ctx.Err() != nil:
+		log.Info("call refused: shutting down", "caller", MaskNumber(caller))
+		refuse(d, log)
+		return
+	case !s.admit():
 		log.Warn("call refused: no free call slot",
 			"caller", MaskNumber(caller), "max_concurrent_calls", s.opts.MaxConcurrentCalls)
-		if err := d.Respond(sipmsg.StatusBusyHere, "Busy Here", nil); err != nil {
-			log.Error("sending 486 Busy Here failed", "error", err)
-		}
+		refuse(d, log)
 		return
 	}
 	defer s.release()
@@ -101,6 +105,15 @@ func (s *Server) handleInvite(ctx context.Context, d *diago.DialogServerSession,
 
 	med, err := d.Answer(diago.AnswerOptions{})
 	if err != nil {
+		// If no final response has gone out yet (an SDP offer diago cannot
+		// answer, no free RTP port), refuse the call so the caller reaches
+		// voicemail. Once a 200 OK is out, only a BYE can end the call, and
+		// diago sends it when this handler returns.
+		if d.LoadState() < sipmsg.DialogStateEstablished {
+			log.Error("answer failed, call refused", "error", err)
+			refuse(d, log)
+			return
+		}
 		log.Error("answer failed", "error", err)
 		return
 	}
@@ -157,6 +170,18 @@ func (s *Server) handleInvite(ctx context.Context, d *diago.DialogServerSession,
 		return
 	}
 	log.Info("call ended", attrs...)
+}
+
+// refuse turns a call away with 486 Busy Here.
+//
+// 486 is chosen for what the S20 does with it, not for its literal meaning:
+// the PBX applies the extension's When Busy forward, so the caller reaches
+// voicemail. diago's default for a call that ends unanswered is 480, which the
+// S20 instead announces to the caller as "extension not available".
+func refuse(d *diago.DialogServerSession, log *slog.Logger) {
+	if err := d.Respond(sipmsg.StatusBusyHere, "Busy Here", nil); err != nil {
+		log.Error("sending 486 Busy Here failed", "error", err)
+	}
 }
 
 // codecOf maps diago's codec to ours. Only G.711 can come back, because the

@@ -102,9 +102,10 @@ func NewServer(opts Options) (*Server, error) {
 	}
 
 	// The libraries log through slog too. Tag them so their lines can be
-	// told apart from ours. sipgo's transport layer and diago's media package
-	// only read package-level loggers.
-	libLog := log.With("component", "diago")
+	// told apart from ours, and demote their known noise (see libNoise).
+	// sipgo's transport layer and diago's media package only read
+	// package-level loggers.
+	libLog := slog.New(quietHandler{next: log.Handler(), noisy: libNoise}).With("component", "diago")
 	sipmsg.SetDefaultLogger(libLog)
 	media.SetDefaultLogger(libLog)
 
@@ -116,6 +117,7 @@ func NewServer(opts Options) (*Server, error) {
 	dg := diago.NewDiago(ua,
 		// WithLogger must come first: WithTransport already logs.
 		diago.WithLogger(libLog),
+		diago.WithServerRequestMiddleware(answerUnsolicitedMWI(log)),
 		diago.WithTransport(diago.Transport{
 			Transport: "udp",
 			BindHost:  opts.BindAddr.String(),
