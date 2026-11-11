@@ -12,7 +12,9 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 GOBUILD := CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)"
 
-.PHONY: build build-linux-amd64 build-linux-arm64 check lint integration echo run clean
+COMPOSE := docker compose -f deploy/compose.yaml
+
+.PHONY: build build-linux-amd64 build-linux-arm64 check lint integration echo greet run tts-up tts-down clean
 
 build:
 	$(GOBUILD) -o bin/$(BINARY) $(PKG)
@@ -32,14 +34,25 @@ check:
 lint:
 	golangci-lint run
 
-# Tests against real providers. They carry the "integration" build tag and need
-# API keys in the environment. There are none yet in milestone 0.
+# Tests against real services. They carry the "integration" build tag. The TTS
+# test needs the local Kokoro running: make tts-up first.
 integration:
 	go test -race -tags integration ./...
 
 # Milestone 0: answer and echo the caller's audio back. The flag beats .env.
 echo: build
 	./bin/$(BINARY) -mode echo
+
+# Milestone 1: answer, speak the greeting, hang up. Needs make tts-up.
+greet: build
+	./bin/$(BINARY) -mode greet
+
+# The local speech services (deploy/compose.yaml), listening on 127.0.0.1.
+tts-up:
+	$(COMPOSE) up -d kokoro
+
+tts-down:
+	$(COMPOSE) down
 
 # Run in the mode set in .env.
 run: build

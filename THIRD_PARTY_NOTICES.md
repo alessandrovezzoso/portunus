@@ -39,6 +39,18 @@ The list is the set of modules linked into `bin/portunus`, as reported by
 | golang.org/x/sys | v0.41.0 | BSD-3-Clause |
 | golang.org/x/time | v0.14.0 | BSD-3-Clause |
 
+## Services that run alongside the binary
+
+These are not linked into `bin/portunus`. They run as separate processes, in
+containers started by `deploy/compose.yaml`, and Portunus talks to them over
+HTTP on 127.0.0.1. They are listed so the licences of everything a deployment
+runs sit in one place.
+
+| Component | Version | Licence | Role |
+|---|---|---|---|
+| Kokoro-FastAPI (github.com/remsky/Kokoro-FastAPI) | v0.10.0 (image `ghcr.io/remsky/kokoro-fastapi-cpu`) | Apache-2.0 | HTTP server for the TTS |
+| Kokoro-82M model weights (huggingface.co/hexgrad/Kokoro-82M) | as bundled by the image | Apache-2.0 | the TTS model and its Italian voice `if_sara` |
+
 ## Notes
 
 - **diago (MPL-2.0).** The MPL applies per file, so no diago source may be

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"net/url"
 	"time"
 
 	"github.com/alessandrovezzoso/portunus/internal/config"
@@ -63,6 +64,47 @@ func preflight(ctx context.Context, cfg *config.Config, log *slog.Logger) (netip
 	}
 	log.Info("bind address", "address", bind, "how", "detected from the route to the registrar")
 	return bind, nil
+}
+
+// preflightTTS checks the speech server before the first call. Nothing here
+// is fatal: an unreachable server is a warning, as CLAUDE.md asks, because it
+// may still be starting up.
+func preflightTTS(ctx context.Context, tts interface{ Check(context.Context) error }, rawURL string, log *slog.Logger) {
+	if u, err := url.Parse(rawURL); err == nil {
+		rctx, cancel := context.WithTimeout(ctx, resolveTimeout)
+		addrs, err := resolveHost(rctx, u.Hostname())
+		cancel()
+		switch {
+		case err != nil:
+			log.Warn("TTS host does not resolve", "host", u.Hostname(), "error", err)
+		case len(leavesLAN(addrs)) > 0:
+			// Kokoro runs on this host. A remote TTS would send every word
+			// the assistant says, and later what callers said, out of the
+			// office.
+			log.Warn("TTS server is outside this host and the LAN: text sent to it leaves the office",
+				"url", rawURL, "addresses", leavesLAN(addrs))
+		}
+	}
+
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := tts.Check(cctx); err != nil {
+		log.Warn("TTS server not reachable; calls will fail until it is (make tts-up)", "url", rawURL, "error", err)
+		return
+	}
+	log.Info("TTS server reachable", "url", rawURL)
+}
+
+// leavesLAN returns the addresses that are neither on this host (loopback)
+// nor on a private network.
+func leavesLAN(addrs []netip.Addr) []netip.Addr {
+	var out []netip.Addr
+	for _, a := range addrs {
+		if !a.IsLoopback() && !a.IsPrivate() {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // resolveHost returns the addresses of host. An IP literal comes back as is,

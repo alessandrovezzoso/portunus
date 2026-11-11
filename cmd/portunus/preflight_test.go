@@ -39,6 +39,13 @@ func TestNonPrivate(t *testing.T) {
 	}
 }
 
+func TestLeavesLAN(t *testing.T) {
+	got := leavesLAN(addrs("127.0.0.1", "::1", "192.168.1.10", "fd00::1", "203.0.113.5", "8.8.8.8"))
+	if want := addrs("203.0.113.5", "8.8.8.8"); !slices.Equal(got, want) {
+		t.Errorf("leavesLAN = %v, want %v", got, want)
+	}
+}
+
 func TestCheckLocal(t *testing.T) {
 	local := addrs("127.0.0.1", "192.168.1.20", "fe80::1")
 

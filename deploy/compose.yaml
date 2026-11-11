@@ -1,0 +1,19 @@
+# Local speech services that run next to the Portunus binary.
+#
+#   make tts-up     start them (docker compose -f deploy/compose.yaml up -d)
+#   make tts-down   stop them
+#
+# They listen on 127.0.0.1 only: Portunus is the only client, and nothing in
+# this file should be reachable from the LAN, let alone the internet.
+
+services:
+  # Kokoro TTS behind Kokoro-FastAPI (Apache-2.0), which serves the OpenAI-style
+  # POST /v1/audio/speech endpoint that internal/tts/openaicompat speaks. The
+  # CPU image is enough: Kokoro runs several times faster than real time
+  # without a GPU. The tag is pinned so an upstream release cannot change the
+  # voice under us; upgrade it deliberately.
+  kokoro:
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.10.0
+    ports:
+      - "127.0.0.1:8880:8880"
+    restart: unless-stopped

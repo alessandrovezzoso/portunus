@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,6 +41,12 @@ const (
 	KeyMaxConcurrentCalls   = "PORTUNUS_MAX_CONCURRENT_CALLS"
 	KeyRingDelay            = "PORTUNUS_RING_DELAY"
 	KeyAllowPublicRegistrar = "PORTUNUS_ALLOW_PUBLIC_REGISTRAR"
+
+	KeyTTSURL       = "PORTUNUS_TTS_URL"
+	KeyTTSModel     = "PORTUNUS_TTS_MODEL"
+	KeyTTSVoice     = "PORTUNUS_TTS_VOICE"
+	KeyOutputBuffer = "PORTUNUS_OUTPUT_BUFFER"
+	KeyGreetingFile = "PORTUNUS_GREETING_FILE"
 )
 
 // knownKeys lists every PORTUNUS_ variable this version understands. Anything
@@ -51,6 +58,7 @@ var knownKeys = []string{
 	KeySIPRegistrar, KeySIPExtension, KeySIPAuthUser, KeySIPPassword, KeySIPBindAddr, KeySIPPort,
 	KeyRTPPortMin, KeyRTPPortMax,
 	KeyMaxConcurrentCalls, KeyRingDelay, KeyAllowPublicRegistrar,
+	KeyTTSURL, KeyTTSModel, KeyTTSVoice, KeyOutputBuffer, KeyGreetingFile,
 }
 
 const keyPrefix = "PORTUNUS_"
@@ -102,6 +110,16 @@ type Config struct {
 
 	AllowPublicRegistrar bool
 
+	TTS TTS
+
+	// OutputBuffer caps the audio queued ahead of the RTP clock. It must hold
+	// a whole reply, or speech is cut mid-utterance.
+	OutputBuffer time.Duration
+
+	// GreetingFile holds the text spoken in greet mode. It lives in prompts/,
+	// which git ignores, because the real text names the office.
+	GreetingFile string
+
 	values  map[string]string // effective value of each setting, for Summary
 	sources map[string]Source
 }
@@ -121,6 +139,14 @@ type SIP struct {
 	// "resolve it at startup from the route to the registrar".
 	BindAddr netip.Addr
 	Port     int
+}
+
+// TTS points at the speech synthesis service: a server speaking the
+// OpenAI-style /v1/audio/speech API, Kokoro-FastAPI by default.
+type TTS struct {
+	URL   string
+	Model string
+	Voice string
 }
 
 const defaultSIPPort = 5060
@@ -143,6 +169,13 @@ func Load(in Inputs) (*Config, []string, error) {
 		MaxConcurrentCalls:   l.int(KeyMaxConcurrentCalls, 2),
 		RingDelay:            l.duration(KeyRingDelay, 0),
 		AllowPublicRegistrar: l.bool(KeyAllowPublicRegistrar, false),
+		TTS: TTS{
+			URL:   l.string(KeyTTSURL, "http://127.0.0.1:8880"),
+			Model: l.string(KeyTTSModel, "kokoro"),
+			Voice: l.string(KeyTTSVoice, "if_sara"),
+		},
+		OutputBuffer: l.duration(KeyOutputBuffer, 10*time.Second),
+		GreetingFile: l.string(KeyGreetingFile, "prompts/greeting.txt"),
 	}
 	cfg.SIP.AuthUser = l.string(KeySIPAuthUser, cfg.SIP.Extension)
 	cfg.LogLevel = l.logLevel(KeyLogLevel, slog.LevelInfo)
@@ -193,6 +226,15 @@ func (c *Config) validate() []error {
 	}
 	if c.RingDelay < 0 {
 		add("%s must not be negative", KeyRingDelay)
+	}
+
+	if u, err := url.Parse(c.TTS.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		add("%s: %q is not an http(s) URL", KeyTTSURL, c.TTS.URL)
+	}
+	// A second of audio is the shortest sentence worth saying; below that,
+	// replies would be cut before they start.
+	if c.OutputBuffer < time.Second {
+		add("%s must be at least 1s (it must hold a whole reply)", KeyOutputBuffer)
 	}
 	return errs
 }

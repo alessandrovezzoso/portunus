@@ -18,8 +18,10 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/alessandrovezzoso/portunus/internal/call"
 	"github.com/alessandrovezzoso/portunus/internal/config"
 	"github.com/alessandrovezzoso/portunus/internal/sip"
+	"github.com/alessandrovezzoso/portunus/internal/tts/openaicompat"
 )
 
 // version is set at build time by the Makefile (-ldflags "-X main.version=...").
@@ -65,15 +67,16 @@ func run() error {
 		log.Warn(w)
 	}
 
-	if cfg.Mode != config.ModeEcho {
-		return fmt.Errorf("mode %q is not implemented yet: this milestone only has echo", cfg.Mode)
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	// After the first signal, restore the default handling: if the graceful
 	// shutdown ever hangs, a second Ctrl+C still kills the process.
 	context.AfterFunc(ctx, stop)
+
+	handler, err := handlerFor(ctx, cfg, log)
+	if err != nil {
+		return err
+	}
 
 	bindAddr, err := preflight(ctx, cfg, log)
 	if err != nil {
@@ -99,9 +102,59 @@ func run() error {
 		return err
 	}
 
-	err = srv.Run(ctx, sip.Echo)
+	err = srv.Run(ctx, handler)
 	log.Info("stopped")
 	return err
+}
+
+// handlerFor picks what Portunus does with an answered call, and builds the
+// adapters that mode needs. This is the one place that knows both the config
+// and the concrete adapters.
+func handlerFor(ctx context.Context, cfg *config.Config, log *slog.Logger) (sip.Handler, error) {
+	switch cfg.Mode {
+	case config.ModeEcho:
+		return sip.Echo, nil
+
+	case config.ModeGreet:
+		greeting, err := readGreeting(cfg.GreetingFile)
+		if err != nil {
+			return nil, err
+		}
+		log.Info("greeting loaded", "file", cfg.GreetingFile, "characters", len([]rune(greeting)))
+
+		tts, err := openaicompat.New(openaicompat.Options{
+			BaseURL: cfg.TTS.URL,
+			Model:   cfg.TTS.Model,
+			Voice:   cfg.TTS.Voice,
+		})
+		if err != nil {
+			return nil, err
+		}
+		preflightTTS(ctx, tts, cfg.TTS.URL, log)
+
+		return call.Greet(tts, greeting, call.GreetOptions{
+			OutputBuffer: cfg.OutputBuffer,
+			Logger:       log,
+		}), nil
+	}
+	return nil, fmt.Errorf("mode %q is not implemented yet: this milestone has echo and greet", cfg.Mode)
+}
+
+// readGreeting reads the greet-mode text. A missing or empty file is fatal:
+// a greeting that says nothing proves nothing.
+func readGreeting(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("%s: %s does not exist (copy prompts/example.greeting.txt to start)", config.KeyGreetingFile, path)
+	}
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", config.KeyGreetingFile, err)
+	}
+	text := strings.TrimSpace(string(raw))
+	if text == "" {
+		return "", fmt.Errorf("%s: %s is empty", config.KeyGreetingFile, path)
+	}
+	return text, nil
 }
 
 // readEnvFile reads PORTUNUS_ENV_FILE, or ./.env when that is unset. A missing

@@ -60,6 +60,15 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.AllowPublicRegistrar {
 		t.Error("AllowPublicRegistrar = true, want false")
 	}
+	if want := (TTS{URL: "http://127.0.0.1:8880", Model: "kokoro", Voice: "if_sara"}); cfg.TTS != want {
+		t.Errorf("TTS = %+v, want %+v", cfg.TTS, want)
+	}
+	if cfg.OutputBuffer != 10*time.Second {
+		t.Errorf("OutputBuffer = %v, want 10s", cfg.OutputBuffer)
+	}
+	if cfg.GreetingFile != "prompts/greeting.txt" {
+		t.Errorf("GreetingFile = %q, want prompts/greeting.txt", cfg.GreetingFile)
+	}
 }
 
 func TestLoadParsesValues(t *testing.T) {
@@ -183,6 +192,9 @@ func TestLoadValidation(t *testing.T) {
 		{"negative ring delay", KeyRingDelay, "-1s", "must not be negative"},
 		{"bad ring delay", KeyRingDelay, "2", "not a duration"},
 		{"bad bool", KeyAllowPublicRegistrar, "yes", "not a boolean"},
+		{"tts url without scheme", KeyTTSURL, "127.0.0.1:8880", "not an http(s) URL"},
+		{"tts url with another scheme", KeyTTSURL, "ws://127.0.0.1:8880", "not an http(s) URL"},
+		{"output buffer too small", KeyOutputBuffer, "500ms", "must be at least 1s"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

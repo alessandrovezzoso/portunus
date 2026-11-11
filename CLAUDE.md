@@ -26,12 +26,15 @@ make build-linux-amd64  # the production host
 make build-linux-arm64
 make check              # go vet + go test -race ./... + govulncheck
 make lint               # golangci-lint
-make integration        # tests against real providers; needs API keys
+make integration        # tests against real services; the TTS test needs make tts-up
 make echo               # run in echo mode (milestone 0)
+make greet              # run in greet mode (milestone 1); needs make tts-up
 make run                # run with the mode set in .env
+make tts-up             # start the local speech services (deploy/compose.yaml)
+make tts-down           # stop them
 ```
 
-Run a single test: `go test ./internal/media/ -run TestPacerPadsUnderrun -v`
+Run a single test: `go test ./internal/media/ -run TestPacerSendsFullFramesAndPadsWithSilence -v`
 
 Config is environment-driven, and the binary reads `.env` from its working directory
 itself, so do not source it first. Precedence is **flag > `.env` > shell environment**. The
@@ -59,8 +62,8 @@ STT → Claude → TTS. Latency is the central problem of this project, so every
 
 **Providers are pluggable.** `internal/call` depends only on the `STT`, `LLM`, `TTS` and
 `VAD` interfaces. `cmd/portunus` picks the adapters from config, and adapters never import
-`internal/call`. Local engines (Whisper, Piper) run as separate HTTP services, so this
-binary stays pure Go with no cgo.
+`internal/call`. Local engines (Kokoro for TTS today, a local STT later) run as separate
+HTTP services, so this binary stays pure Go with no cgo.
 
 **Callers speak Italian, on narrowband phone audio.** Every STT/TTS adapter and every prompt
 is judged on Italian 8 kHz telephone audio, not on English demos.
@@ -79,7 +82,9 @@ Call flow, end to end:
 
 Each call runs three goroutines, all cancelled by a shared context:
 1. **inbound**: RTP read → G.711 decode → resample → VAD and STT.
-2. **outbound pacer**: a 20 ms ticker that writes exactly one frame per tick.
+2. **outbound pacer**: writes exactly one frame every 20 ms. The 20 ms clock is diago's RTP
+   writer, whose every `Write` blocks until its next tick. The pacer feeds it one frame per
+   `Write`, and silence when its queue is empty.
 3. **orchestrator** (`internal/call`): the turn state machine (listening → thinking →
    speaking), barge-in, silence timeout, maximum call time and maximum turns.
 
@@ -101,8 +106,8 @@ remembered across calls.
   about to resample anywhere else, stop.
 - **The output pacer is where call quality lives.** TTS emits audio in bursts, often faster
   than realtime, while RTP needs one 160-byte frame every 20 ms. The buffer absorbs the
-  burst, the ticker drains it, and encoded silence pads underruns (`0xD5` A-law, `0xFF`
-  µ-law).
+  burst, the 20 ms clock drains it, and encoded silence pads underruns (`0xD5` A-law,
+  `0xFF` µ-law).
   - The buffer is capped at `PORTUNUS_OUTPUT_BUFFER` (default 10 s) and drops the **oldest**
     bytes on overflow.
   - The cap must hold a full reply, or speech is cut mid-utterance. Barge-in flushes the
@@ -153,6 +158,9 @@ remembered across calls.
   first.
 - `diago.AudioStereoRecordingWav` contains a mutex and must never be copied. `go vet`
   catches this.
+- **diago's RTP writer is the 20 ms clock.** Each `Write` sends one packet, then blocks on
+  the writer's own ticker. Never call `ClockDisable`: it leaves the ticker nil, and the next
+  `Write` panics. A second ticker in the pacer would only fight this one.
 - **diago answers only SDP offers with a single `m=` line.** It counts every `m=` line,
   whatever its type, and rejects the offer with `more than 1 media line for type "audio"`.
   An S20 offer with `m=audio` plus `m=video` therefore cannot be answered, so the S20's video
@@ -302,13 +310,39 @@ fault before suspecting a provider.
 - **Ring delay.** `PORTUNUS_RING_DELAY` defaults to `0`, because the S20 already decides
   when a call reaches Portunus.
 
+## Kokoro notes
+
+- **It runs as Kokoro-FastAPI in a container** (`deploy/compose.yaml`), with the image tag
+  pinned and the port bound to `127.0.0.1:8880`. Portunus calls it through
+  `internal/tts/openaicompat`.
+- **Its text normalizer is turned off** (`normalization_options.normalize: false`), because
+  it is written for English. Normalizing Italian numbers, phone numbers and times is
+  Portunus's job, at the `agent` milestone. Left to espeak-ng, `02 4567 8901` is read as
+  large numbers ("quattromilacinquecento…"), not digit by digit.
+- **It is weak on very short utterances** (fewer than 10–20 tokens), so the sentence splitter
+  should merge short sentences before sending them.
+- **The voice prefix picks the language.** `if_sara` selects the Italian pipeline, so no
+  `lang_code` is sent.
+- **Speed:** about 9× real time on an M3 Pro CPU, and slower on the first synthesis after
+  start. Measure the VM's CPU before deploying.
+
+## Decisions taken
+
+- **TTS: Kokoro, with the female Italian voice `if_sara`, run locally** (see the Kokoro
+  notes). It was chosen in a blind listening test at telephone quality (300–3400 Hz, 8 kHz,
+  G.711 µ-law round trip): free, Apache-2.0, and no text leaves the office. Pocket TTS lost
+  that test: numbers and times sounded garbled, and the voice was not natural enough.
+- **Local TTS API: the OpenAI-style `POST /v1/audio/speech`**, with `response_format: "pcm"`
+  (24 kHz, 16-bit little-endian mono) and `stream: true`. Any compatible server works with
+  `internal/tts/openaicompat`, so changing the engine is a configuration change.
+
 ## Open decisions: ask, do not choose
 
-- **The first cloud STT and TTS providers.** Criteria: streaming, quality on Italian 8 kHz
-  audio, latency, EU data processing.
+- **The first STT provider.** Criteria: streaming, quality on Italian 8 kHz audio, latency,
+  EU data processing.
 - **The VAD implementation:** pure-Go energy-based, a model behind a local service, or the
   STT provider's own endpointing.
-- **The HTTP API shape** of the local STT/TTS services.
+- **The HTTP API shape** of a local STT service, if the STT is local.
 
 ## Not in v1
 
