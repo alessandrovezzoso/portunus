@@ -1,6 +1,6 @@
 module github.com/alessandrovezzoso/portunus
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/emiago/diago v0.42.1
@@ -29,10 +29,10 @@ require (
 	github.com/pion/turn/v5 v5.0.12 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/zaf/g711 v1.4.0 // indirect
-	golang.org/x/crypto v0.48.0 // indirect
-	golang.org/x/net v0.50.0 // indirect
+	golang.org/x/crypto v0.59.0 // indirect
+	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/sync v0.16.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	gopkg.in/hraban/opus.v2 v2.0.0-20230925203106-0188a62cb302 // indirect
 )

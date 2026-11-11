@@ -33,10 +33,10 @@ The list is the set of modules linked into `bin/portunus`, as reported by
 | github.com/pion/turn/v5 | v5.0.12 | MIT |
 | github.com/wlynxg/anet | v0.0.5 | BSD-3-Clause |
 | github.com/zaf/g711 | v1.4.0 | BSD-3-Clause |
-| golang.org/x/crypto | v0.48.0 | BSD-3-Clause |
-| golang.org/x/net | v0.50.0 | BSD-3-Clause |
+| golang.org/x/crypto | v0.59.0 | BSD-3-Clause |
+| golang.org/x/net | v0.62.0 | BSD-3-Clause |
 | golang.org/x/sync | v0.16.0 | BSD-3-Clause |
-| golang.org/x/sys | v0.41.0 | BSD-3-Clause |
+| golang.org/x/sys | v0.50.0 | BSD-3-Clause |
 | golang.org/x/time | v0.14.0 | BSD-3-Clause |
 
 ## Services that run alongside the binary
