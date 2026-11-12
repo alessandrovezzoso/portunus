@@ -20,7 +20,8 @@ type CallInfo struct {
 	// Start is when the call was answered, for the date and time the model
 	// sees ("call me back tomorrow" needs to know what today is).
 	Start time.Time
-	// Greeting is what Portunus already said when it answered.
+	// Greeting is what Portunus already said when it answered, as the caller
+	// heard it: plain words, without the TTS's pause tags.
 	Greeting string
 }
 

@@ -63,6 +63,20 @@ func TestNormalizeItalian(t *testing.T) {
 	}
 }
 
+func TestStripPauses(t *testing.T) {
+	for in, want := range map[string]string{
+		"Buongiorno, [pause:0.1s] sono Portunus. [pause:0.4s] Come posso aiutarla?": "Buongiorno, sono Portunus. Come posso aiutarla?",
+		"[pause:0.3s]Salve.[pause:1s]":    "Salve.",
+		"Nessuna pausa qui.":              "Nessuna pausa qui.",
+		"Le parentesi [vere] restano.":    "Le parentesi [vere] restano.",
+		"Alle 9:30 [pause:0.2s] apriamo.": "Alle 9:30 apriamo.",
+	} {
+		if got := StripPauses(in); got != want {
+			t.Errorf("StripPauses(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+}
+
 func TestSanitize(t *testing.T) {
 	for in, want := range map[string]string{
 		"**Certo!** Ecco cosa posso fare:": "Certo! Ecco cosa posso fare:",

@@ -34,6 +34,13 @@ var months = [...]string{"", "gennaio", "febbraio", "marzo", "aprile", "maggio",
 // are instructions to the TTS, not text: their digits must stay digits.
 var pauseTagRe = regexp.MustCompile(`\[pause:[^\]]*\]`)
 
+// StripPauses returns text as a listener hears it: without pause tags, and
+// with the spaces around them collapsed. The model is told what was said,
+// not how the TTS was asked to say it, or it might start writing tags itself.
+func StripPauses(text string) string {
+	return strings.Join(strings.Fields(pauseTagRe.ReplaceAllString(text, " ")), " ")
+}
+
 // NormalizeItalian spells out the numbers in text, leaving pause tags alone.
 func NormalizeItalian(text string) string {
 	var out strings.Builder

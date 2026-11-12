@@ -75,6 +75,7 @@ type scriptedLLM struct {
 	replies []fakeReply
 
 	mu      sync.Mutex
+	info    CallInfo
 	callers []string
 	started chan struct{} // closed when the first reply starts, if set
 }
@@ -87,7 +88,18 @@ type fakeReply struct {
 	block   bool // stream one piece, then wait for the context to end
 }
 
-func (s *scriptedLLM) NewConversation(CallInfo) Conversation { return &scriptedConv{llm: s} }
+func (s *scriptedLLM) NewConversation(info CallInfo) Conversation {
+	s.mu.Lock()
+	s.info = info
+	s.mu.Unlock()
+	return &scriptedConv{llm: s}
+}
+
+func (s *scriptedLLM) callInfo() CallInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.info
+}
 
 type scriptedConv struct {
 	llm  *scriptedLLM
@@ -132,7 +144,9 @@ type unavailableErr struct{}
 func (unavailableErr) Error() string     { return "credit balance too low" }
 func (unavailableErr) Unavailable() bool { return true }
 
-const testGreeting = "Buongiorno, risponde l'assistente automatico dell'ufficio."
+// testGreeting carries a pause tag, like the real greeting: the TTS must get
+// it, and the model must not.
+const testGreeting = "Buongiorno, [pause:0.1s] risponde l'assistente automatico dell'ufficio."
 
 // runAgent runs one call and returns its log. The caller hangs up when the
 // handler returns, or earlier if the test closes in.hangup itself.
@@ -201,6 +215,9 @@ func TestAgentHoldsAConversationAndHangsUp(t *testing.T) {
 
 	if got := llm.heard(); strings.Join(got, "|") != "frase 1|frase 2" {
 		t.Errorf("the model heard %q, want the two phrases", got)
+	}
+	if got, want := llm.callInfo().Greeting, "Buongiorno, risponde l'assistente automatico dell'ufficio."; got != want {
+		t.Errorf("the model was told the greeting was %q, want %q", got, want)
 	}
 	said := strings.Join(tts.said(), " | ")
 	for _, want := range []string{testGreeting, "mi dica pure il suo nome", "Arrivederci."} {

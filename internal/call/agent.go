@@ -10,6 +10,7 @@ import (
 
 	"github.com/alessandrovezzoso/portunus/internal/media"
 	"github.com/alessandrovezzoso/portunus/internal/sip"
+	"github.com/alessandrovezzoso/portunus/internal/speech"
 )
 
 // AgentOptions configures the agent mode. Zero values mean the defaults,
@@ -99,6 +100,8 @@ func Agent(llm LLM, stt STT, tts TTS, newVAD func() (VAD, error), opts AgentOpti
 		opts.muteTail = echoTail
 	}
 	segCfg := segmenterConfigFor(opts.VADThreshold, opts.VADSilence, opts.MaxUtterance)
+	// The TTS gets the greeting with its pause tags; the model gets the words.
+	heardGreeting := speech.StripPauses(opts.Greeting)
 
 	return func(ctx context.Context, c *sip.Call) error {
 		answered := time.Now()
@@ -119,7 +122,7 @@ func Agent(llm LLM, stt STT, tts TTS, newVAD func() (VAD, error), opts AgentOpti
 		a := &agentCall{
 			opts: opts,
 			stt:  stt,
-			conv: llm.NewConversation(CallInfo{Start: answered, Greeting: opts.Greeting}),
+			conv: llm.NewConversation(CallInfo{Start: answered, Greeting: heardGreeting}),
 			m:    &mouth{tts: tts, law: law, pacer: pacer, log: log},
 			log:  log,
 			rate: vad.SampleRate(),
