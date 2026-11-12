@@ -290,3 +290,53 @@ func TestProbe(t *testing.T) {
 		t.Errorf("Probe with no credit = %v, want an unavailable error", err)
 	}
 }
+
+// TestEnvironmentIsIgnored sets the variables the SDK would read on its own.
+// Portunus's configuration must be the only one in effect: no extra header,
+// and no other server, may come from the process environment.
+func TestEnvironmentIsIgnored(t *testing.T) {
+	t.Setenv("ANTHROPIC_CUSTOM_HEADERS", "X-Leak: yes")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "someone-elses-token")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Leak") != "" {
+			t.Error("a header from ANTHROPIC_CUSTOM_HEADERS reached the server")
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
+			t.Errorf("authorization %q, want the configured key only", got)
+		}
+		sse(w, []string{"Buongiorno, mi dica pure."}, false, "end_turn")
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv, false)
+	if _, err := c.NewConversation(time.Now(), "Buongiorno.").Reply(context.Background(), "Pronto?", func(string) {}); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+}
+
+// TestUsageSurvivesAFailedStream cuts a stream after message_start: the input
+// was billed, so the failed Reply must still report it.
+func TestUsageSurvivesAFailedStream(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: message_start\ndata: "+
+			`{"type":"message_start","message":{"id":"msg_cut","type":"message","role":"assistant",`+
+			`"model":"claude-haiku-5-5","content":[],"stop_reason":null,`+
+			`"usage":{"input_tokens":40,"output_tokens":1,"cache_read_input_tokens":800,"cache_creation_input_tokens":0}}}`+"\n\n")
+		_, _ = fmt.Fprint(w, "event: error\ndata: "+
+			`{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`+"\n\n")
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv, false)
+	r, err := c.NewConversation(time.Now(), "Buongiorno.").Reply(context.Background(), "Pronto?", func(string) {})
+	if err == nil {
+		t.Fatal("a stream that ends in an error must fail")
+	}
+	if r.InputTokens != 40 || r.CacheReadTokens != 800 {
+		t.Errorf("usage of the failed reply = %+v, want the 40 input and 800 cache-read tokens billed", r)
+	}
+	if r.Text != "" || r.EndCall {
+		t.Errorf("a failed reply must carry usage only, got %+v", r)
+	}
+}

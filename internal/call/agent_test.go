@@ -85,7 +85,8 @@ type fakeReply struct {
 	endCall bool
 	refused bool
 	err     error
-	block   bool // stream one piece, then wait for the context to end
+	usage   Usage // what a failed reply was billed (with err)
+	block   bool  // stream one piece, then wait for the context to end
 }
 
 func (s *scriptedLLM) NewConversation(info CallInfo) Conversation {
@@ -120,7 +121,7 @@ func (c *scriptedConv) Reply(ctx context.Context, caller string, onText func(str
 	r := c.llm.replies[c.turn]
 	c.turn++
 	if r.err != nil {
-		return Reply{}, r.err
+		return Reply{Usage: r.usage}, r.err
 	}
 	for i := 0; i < len(r.text); i += 7 {
 		onText(r.text[i:min(i+7, len(r.text))])
@@ -393,5 +394,118 @@ func TestAgentSpeaksTheRefusalLine(t *testing.T) {
 	runAgent(t, llm, &fakeSTT{rate: media.TelephoneRate}, tts, in, AgentOptions{})
 	if !strings.Contains(strings.Join(tts.said(), "|"), lineRefusal) {
 		t.Errorf("said %q, want the refusal line", tts.said())
+	}
+}
+
+// stuckTTS speaks the greeting, then hangs on every later text: a server that
+// accepts the request and stops answering mid-stream.
+type stuckTTS struct{ recordingTTS }
+
+func (s *stuckTTS) Synthesize(ctx context.Context, text string) (io.ReadCloser, error) {
+	if len(s.said()) == 0 {
+		return s.recordingTTS.Synthesize(ctx, text)
+	}
+	s.mu.Lock()
+	s.texts = append(s.texts, text)
+	s.mu.Unlock()
+	return io.NopCloser(blockingReader{ctx}), nil
+}
+
+type blockingReader struct{ ctx context.Context }
+
+func (b blockingReader) Read([]byte) (int, error) {
+	<-b.ctx.Done()
+	return 0, b.ctx.Err()
+}
+
+func TestAgentHardCeilingCutsAStuckTurn(t *testing.T) {
+	llm := &scriptedLLM{replies: []fakeReply{{text: "Certo, mi dica pure il suo nome e il numero."}}}
+	in := &pacedInbound{frames: script(silenceFrames(100), phrase()), hangup: make(chan struct{})}
+
+	// The soft ceiling cannot fire while the turn is stuck; only the hard one
+	// can end this call. runAgent fails the test if it never ends.
+	logs, _ := runAgent(t, llm, &fakeSTT{rate: media.TelephoneRate}, &stuckTTS{}, in,
+		AgentOptions{MaxCallTime: 500 * time.Millisecond, hardGrace: 300 * time.Millisecond})
+
+	for _, want := range []string{`msg="call cut: a turn was still running past the time ceiling"`, "reason=max_call_time"} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("log lacks %q\n%s", want, logs)
+		}
+	}
+}
+
+func TestAgentStripsPauseTagsFromTheModel(t *testing.T) {
+	llm := &scriptedLLM{replies: []fakeReply{
+		{text: "Certo, la ascolto. [pause:300s] Mi dica pure il suo nome, per favore.", endCall: true},
+	}}
+	tts := &recordingTTS{}
+	in := &pacedInbound{frames: script(silenceFrames(100), phrase()), hangup: make(chan struct{})}
+
+	runAgent(t, llm, &fakeSTT{rate: media.TelephoneRate}, tts, in, AgentOptions{})
+
+	said := tts.said()
+	if len(said) < 2 || !strings.Contains(said[0], "[pause:0.1s]") {
+		t.Fatalf("said %q: the fixed greeting must keep its pause tags", said)
+	}
+	for _, s := range said[1:] {
+		if strings.Contains(s, "[pause") {
+			t.Errorf("a pause tag written by the model reached the TTS: %q", s)
+		}
+	}
+	if !strings.Contains(strings.Join(said[1:], " "), "Certo, la ascolto. Mi dica pure il suo nome") {
+		t.Errorf("the reply's words must survive: %q", said[1:])
+	}
+}
+
+// emptySTT hears nothing intelligible in any utterance.
+type emptySTT struct{}
+
+func (emptySTT) SampleRate() int { return media.TelephoneRate }
+
+func (emptySTT) Transcribe(context.Context, []int16) (string, error) { return "", nil }
+
+func TestAgentAsksAgainWhenNothingWasUnderstood(t *testing.T) {
+	clip := make([]int16, 400)
+	for _, tt := range []struct {
+		name    string
+		holding [][]int16
+		asks    bool
+	}{
+		{"after a holding phrase, it asks again", [][]int16{clip}, true},
+		{"without one, it just waits", nil, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			llm := &scriptedLLM{}
+			tts := &recordingTTS{}
+			in := &pacedInbound{frames: script(silenceFrames(100), phrase()), hangup: make(chan struct{})}
+			runAgent(t, llm, emptySTT{}, tts, in, AgentOptions{Holding: tt.holding, MaxCallTime: 600 * time.Millisecond})
+
+			asked := false
+			for _, s := range tts.said() {
+				asked = asked || s == lineNotUnderstood
+			}
+			if asked != tt.asks {
+				t.Errorf("asked again = %v, want %v (said %q)", asked, tt.asks, tts.said())
+			}
+			if n := len(llm.heard()); n != 0 {
+				t.Errorf("the model was asked %d times about nothing", n)
+			}
+		})
+	}
+}
+
+func TestAgentCountsTheUsageOfAFailedReply(t *testing.T) {
+	llm := &scriptedLLM{replies: []fakeReply{{err: errors.New("overloaded"), usage: Usage{Input: 50, CacheRead: 700}}}}
+	in := &pacedInbound{frames: script(silenceFrames(100), phrase()), hangup: make(chan struct{})}
+
+	logs, _ := runAgent(t, llm, &fakeSTT{rate: media.TelephoneRate}, &recordingTTS{}, in, AgentOptions{})
+
+	for _, want := range []string{
+		`msg="call usage" call_id=agent-test input_tokens=50 output_tokens=0 cache_read_tokens=700`,
+		"reason=llm_error",
+	} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("log lacks %q\n%s", want, logs)
+		}
 	}
 }

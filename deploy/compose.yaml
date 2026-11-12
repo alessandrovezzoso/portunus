@@ -5,18 +5,25 @@
 #   make tts-down   stop Kokoro; make stt-down stops Whisper
 #
 # They listen on 127.0.0.1 only: Portunus is the only client, and nothing in
-# this file should be reachable from the LAN, let alone the internet.
+# this file should be reachable from the LAN, let alone the internet. Both run
+# as unprivileged users, with no Linux capabilities and no way to gain any:
+# neither needs more than to read its model and answer HTTP.
 
 services:
   # Kokoro TTS behind Kokoro-FastAPI (Apache-2.0), which serves the OpenAI-style
   # POST /v1/audio/speech endpoint that internal/tts/openaicompat speaks. The
   # CPU image is enough: Kokoro runs several times faster than real time
-  # without a GPU. The tag is pinned so an upstream release cannot change the
-  # voice under us; upgrade it deliberately.
+  # without a GPU. The image is pinned by digest as well as by tag: a tag can
+  # be moved to other bytes, a digest cannot, so an upstream change can never
+  # reach this host unnoticed. Upgrade both together, deliberately.
   kokoro:
-    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.10.0
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.10.0@sha256:f54c5960c2b9387f6349080a9944f8bc7e8cdb98a4ef9238cb0b0f9ff9795f44
     ports:
       - "127.0.0.1:8880:8880"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: unless-stopped
 
   # Whisper large-v3-turbo behind whisper.cpp's server (MIT), built locally
@@ -54,4 +61,8 @@ services:
       # tune it to the VM at deployment.
       - --threads
       - "8"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: unless-stopped

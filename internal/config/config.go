@@ -19,6 +19,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	// The time zone database, compiled in: the VM may be a minimal install
+	// with no /usr/share/zoneinfo, and PORTUNUS_TIME_ZONE must still load.
+	_ "time/tzdata"
 )
 
 // Setting names. They are the only place these strings are spelled out.
@@ -63,6 +67,7 @@ const (
 
 	KeyMaxCallTime = "PORTUNUS_MAX_CALL_TIME"
 	KeyMaxTurns    = "PORTUNUS_MAX_TURNS"
+	KeyTimeZone    = "PORTUNUS_TIME_ZONE"
 
 	KeySystemPromptFile  = "PORTUNUS_SYSTEM_PROMPT_FILE"
 	KeyAgentGreetingFile = "PORTUNUS_AGENT_GREETING_FILE"
@@ -80,7 +85,7 @@ var knownKeys = []string{
 	KeyMaxConcurrentCalls, KeyRingDelay, KeyAllowPublicRegistrar,
 	KeyTTSURL, KeyTTSModel, KeyTTSVoice, KeyOutputBuffer, KeyGreetingFile,
 	KeySTTURL, KeySTTModel, KeySTTMaxUtterance, KeyVADThreshold, KeyVADSilence,
-	KeyLLMModel, KeyLLMMaxTokens, KeyLLMThinking, KeyMaxCallTime, KeyMaxTurns,
+	KeyLLMModel, KeyLLMMaxTokens, KeyLLMThinking, KeyMaxCallTime, KeyMaxTurns, KeyTimeZone,
 	KeySystemPromptFile, KeyAgentGreetingFile, KeyHoldingFile,
 }
 
@@ -154,6 +159,11 @@ type Config struct {
 	// mode. Either one ends the call gracefully.
 	MaxCallTime time.Duration
 	MaxTurns    int
+
+	// TimeZone is the office's, for the date and time the model is told. It
+	// is a setting rather than the host's zone, because a VM set to UTC
+	// would otherwise have the assistant give callers the wrong time.
+	TimeZone *time.Location
 
 	// The texts of the agent mode. They live in prompts/, which git ignores,
 	// because the real ones name the office.
@@ -278,6 +288,7 @@ func Load(in Inputs) (*Config, []string, error) {
 	cfg.LogLevel = l.logLevel(KeyLogLevel, slog.LevelInfo)
 	cfg.SIP.RegistrarHost, cfg.SIP.RegistrarPort = l.hostPort(KeySIPRegistrar)
 	cfg.SIP.BindAddr = l.addr(KeySIPBindAddr)
+	cfg.TimeZone = l.location(KeyTimeZone, "Europe/Rome")
 
 	cfg.values, cfg.sources = l.values, l.sources
 
@@ -528,6 +539,20 @@ func (l *loader) logLevel(key string, def slog.Level) slog.Level {
 		return def
 	}
 	return level
+}
+
+// location parses an IANA time zone name, such as Europe/Rome.
+func (l *loader) location(key, def string) *time.Location {
+	v, ok := l.raw(key, def)
+	if !ok {
+		v = def
+	}
+	loc, err := time.LoadLocation(v)
+	if err != nil {
+		l.fail(key, v, errors.New("not a time zone (for example Europe/Rome)"))
+		return time.UTC
+	}
+	return loc
 }
 
 // hostPort parses "host" or "host:port". The port defaults to 5060.

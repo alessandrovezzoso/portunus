@@ -94,7 +94,7 @@ func run() error {
 		return err
 	}
 
-	bindAddr, err := preflight(ctx, cfg, log)
+	bindAddr, registrar, err := preflight(ctx, cfg, log)
 	if err != nil {
 		return fmt.Errorf("preflight: %w", err)
 	}
@@ -104,6 +104,7 @@ func run() error {
 		Port:               cfg.SIP.Port,
 		RegistrarHost:      cfg.SIP.RegistrarHost,
 		RegistrarPort:      cfg.SIP.RegistrarPort,
+		TrustedSources:     registrar,
 		Extension:          cfg.SIP.Extension,
 		AuthUser:           cfg.SIP.AuthUser,
 		Password:           cfg.SIP.Password,

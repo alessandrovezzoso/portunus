@@ -31,7 +31,9 @@ type Conversation interface {
 	// each piece of text as it arrives, so speech can start before the reply
 	// is complete. Cancelling ctx must abort the stream.
 	//
-	// When Reply fails, the conversation is left as it was before the call.
+	// When Reply fails, the conversation is left as it was before the call,
+	// and the returned Reply carries only Usage: the tokens already billed
+	// for the failed attempt, if any.
 	Reply(ctx context.Context, callerText string, onText func(string)) (Reply, error)
 }
 

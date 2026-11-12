@@ -10,6 +10,8 @@
 # Both pins are deliberate. Upgrade them together with a listening test,
 # because a new release or model can change what gets transcribed.
 ARG WHISPER_CPP_VERSION=v1.9.5
+# The commit that tag points to. A tag can be moved; the build fails if it was.
+ARG WHISPER_CPP_COMMIT=d1be6fde11ac6e0407606b4e42fe72d34add8037
 ARG MODEL_FILE=ggml-large-v3-turbo-q5_0.bin
 ARG MODEL_SHA256=394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2
 # A Hugging Face commit of ggerganov/whisper.cpp, so the URL cannot start
@@ -18,10 +20,12 @@ ARG MODEL_REVISION=5359861c739e955e79d9a303bcbc70fb988958b1
 
 FROM debian:13 AS build
 ARG WHISPER_CPP_VERSION
+ARG WHISPER_CPP_COMMIT
 RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential cmake git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
-RUN git clone --depth 1 --branch "${WHISPER_CPP_VERSION}" https://github.com/ggml-org/whisper.cpp /src
+RUN git clone --depth 1 --branch "${WHISPER_CPP_VERSION}" https://github.com/ggml-org/whisper.cpp /src \
+ && test "$(git -C /src rev-parse HEAD)" = "${WHISPER_CPP_COMMIT}"
 WORKDIR /src
 # Static libraries, so the runtime image needs only the C++ and OpenMP
 # runtimes. Only the server is built: the other examples and the tests are

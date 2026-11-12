@@ -349,3 +349,41 @@ func TestAgentModeNeedsTheAPIKey(t *testing.T) {
 		t.Errorf("listen mode without a key: %v", err)
 	}
 }
+
+func TestTimeZone(t *testing.T) {
+	if got := mustLoad(t, Inputs{Env: minimal()}).TimeZone.String(); got != "Europe/Rome" {
+		t.Errorf("default time zone %q, want Europe/Rome", got)
+	}
+
+	in := minimal()
+	in[KeyTimeZone] = "UTC"
+	if got := mustLoad(t, Inputs{Env: in}).TimeZone.String(); got != "UTC" {
+		t.Errorf("time zone %q, want UTC", got)
+	}
+
+	in[KeyTimeZone] = "Europe/Roma"
+	if _, _, err := Load(Inputs{Env: in}); err == nil || !strings.Contains(err.Error(), KeyTimeZone) {
+		t.Errorf("a misspelled zone must be an error naming %s, got %v", KeyTimeZone, err)
+	}
+}
+
+// TestEnvExampleMatchesTheCode keeps .env.example honest: it must parse, it
+// must hold no setting this version ignores, and it must list every setting
+// there is, so it never falls behind the code.
+func TestEnvExampleMatchesTheCode(t *testing.T) {
+	example, err := ReadDotEnv("../../.env.example")
+	if err != nil {
+		t.Fatalf("read .env.example: %v", err)
+	}
+	if warnings := unknownKeys(Inputs{DotEnv: example}); len(warnings) > 0 {
+		t.Errorf(".env.example holds settings the code does not know: %v", warnings)
+	}
+	for _, key := range append(knownKeys, KeyAnthropicAPIKey) {
+		if key == KeyEnvFile {
+			continue // read from the environment only, before any file
+		}
+		if _, ok := example[key]; !ok {
+			t.Errorf(".env.example lacks %s", key)
+		}
+	}
+}

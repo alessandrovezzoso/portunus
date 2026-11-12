@@ -51,6 +51,7 @@ func agentHandler(ctx context.Context, cfg *config.Config, log *slog.Logger) (si
 		MaxTokens:    cfg.LLM.MaxTokens,
 		SystemPrompt: systemPrompt,
 		Thinking:     cfg.LLM.Thinking,
+		Location:     cfg.TimeZone,
 	})
 	if err != nil {
 		return nil, nil, err

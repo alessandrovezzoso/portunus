@@ -18,20 +18,18 @@ func (l claudeLLM) NewConversation(info call.CallInfo) call.Conversation {
 
 type claudeConversation struct{ c *anthropic.Conversation }
 
+// Reply passes the usage on even when the reply fails: those tokens were
+// billed, and the end-of-call log must count them.
 func (v claudeConversation) Reply(ctx context.Context, callerText string, onText func(string)) (call.Reply, error) {
 	r, err := v.c.Reply(ctx, callerText, onText)
-	if err != nil {
-		return call.Reply{}, err
+	usage := call.Usage{
+		Input:      r.InputTokens,
+		Output:     r.OutputTokens,
+		CacheRead:  r.CacheReadTokens,
+		CacheWrite: r.CacheWriteTokens,
 	}
-	return call.Reply{
-		Text:    r.Text,
-		EndCall: r.EndCall,
-		Refused: r.Refused,
-		Usage: call.Usage{
-			Input:      r.InputTokens,
-			Output:     r.OutputTokens,
-			CacheRead:  r.CacheReadTokens,
-			CacheWrite: r.CacheWriteTokens,
-		},
-	}, nil
+	if err != nil {
+		return call.Reply{Usage: usage}, err
+	}
+	return call.Reply{Text: r.Text, EndCall: r.EndCall, Refused: r.Refused, Usage: usage}, nil
 }

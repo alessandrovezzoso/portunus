@@ -33,6 +33,11 @@ type Options struct {
 
 	RegistrarHost string
 	RegistrarPort int
+	// TrustedSources are the only addresses requests are accepted from: the
+	// PBX's, as resolved at startup. Every other source gets 403, so nothing
+	// else on the LAN can call Portunus behind the PBX's back. At least one
+	// is required.
+	TrustedSources []netip.Addr
 
 	Extension string
 	AuthUser  string
@@ -94,6 +99,9 @@ func NewServer(opts Options) (*Server, error) {
 	if opts.MaxConcurrentCalls < 1 {
 		return nil, errors.New("sip: MaxConcurrentCalls must be at least 1")
 	}
+	if len(opts.TrustedSources) == 0 {
+		return nil, errors.New("sip: at least one trusted source (the PBX's address) is required")
+	}
 	log := opts.Logger
 	if log == nil {
 		log = slog.Default()
@@ -128,7 +136,8 @@ func NewServer(opts Options) (*Server, error) {
 	dg := diago.NewDiago(ua,
 		// WithLogger must come first: WithTransport already logs.
 		diago.WithLogger(libLog),
-		diago.WithServerRequestMiddleware(answerUnsolicitedMWI(log)),
+		// Untrusted sources are refused before anything else looks at them.
+		diago.WithServerRequestMiddleware(chain(onlyFrom(opts.TrustedSources, log), answerUnsolicitedMWI(log))),
 		diago.WithTransport(diago.Transport{
 			Transport: "udp",
 			BindHost:  opts.BindAddr.String(),

@@ -15,20 +15,26 @@ import (
 
 const resolveTimeout = 5 * time.Second
 
-// preflight runs the checks that must pass before Portunus registers, and
-// returns the LAN address to bind to.
-//
-// For now that means the network: the registrar must be on a private network,
-// and the bind address must be a concrete local address. Provider credential
-// checks join here in later milestones.
-func preflight(ctx context.Context, cfg *config.Config, log *slog.Logger) (netip.Addr, error) {
+// preflight runs the network checks that must pass before Portunus
+// registers: the registrar must be on a private network, and the bind address
+// must be a concrete local address. It returns the address to bind to and the
+// registrar's addresses, the only ones SIP requests are accepted from. (The
+// provider checks run earlier, in handlerFor, because they depend on the
+// mode.)
+func preflight(ctx context.Context, cfg *config.Config, log *slog.Logger) (bind netip.Addr, registrar []netip.Addr, err error) {
 	host := cfg.SIP.RegistrarHost
 
 	rctx, cancel := context.WithTimeout(ctx, resolveTimeout)
 	defer cancel()
 	addrs, err := resolveHost(rctx, host)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("resolve registrar %q: %w", host, err)
+		return netip.Addr{}, nil, fmt.Errorf("resolve registrar %q: %w", host, err)
+	}
+	if _, err := netip.ParseAddr(host); err != nil {
+		// A name is checked here, once. The SIP stack resolves it again for
+		// every REGISTER, and a DNS change after startup would go unchecked.
+		log.Warn("the registrar is a host name: use the S20's IP address instead",
+			"registrar", host, "addresses", addrs)
 	}
 
 	// The S20 is on the LAN, so a public registrar address almost always
@@ -36,34 +42,34 @@ func preflight(ctx context.Context, cfg *config.Config, log *slog.Logger) (netip
 	// credentials, and later our callers' audio, to someone else.
 	if public := nonPrivate(addrs); len(public) > 0 {
 		if !cfg.AllowPublicRegistrar {
-			return netip.Addr{}, fmt.Errorf(
+			return netip.Addr{}, nil, fmt.Errorf(
 				"registrar %q resolves to %v, which is not a private address; use the S20's LAN IP, or set %s=true if this is really intended",
 				host, public, config.KeyAllowPublicRegistrar)
 		}
 		log.Warn("registrar is not on a private network, allowed by override",
 			"registrar", host, "addresses", public, "override", config.KeyAllowPublicRegistrar)
 	}
-	registrar := netip.AddrPortFrom(addrs[0], uint16(cfg.SIP.RegistrarPort))
-	log.Info("registrar resolved", "registrar", host, "address", registrar)
+	first := netip.AddrPortFrom(addrs[0], uint16(cfg.SIP.RegistrarPort))
+	log.Info("registrar resolved", "registrar", host, "address", first)
 
 	if cfg.SIP.BindAddr.IsValid() {
 		local, err := localAddrs()
 		if err != nil {
-			return netip.Addr{}, fmt.Errorf("list local addresses: %w", err)
+			return netip.Addr{}, nil, fmt.Errorf("list local addresses: %w", err)
 		}
 		if err := checkLocal(cfg.SIP.BindAddr, local); err != nil {
-			return netip.Addr{}, fmt.Errorf("%s: %w", config.KeySIPBindAddr, err)
+			return netip.Addr{}, nil, fmt.Errorf("%s: %w", config.KeySIPBindAddr, err)
 		}
 		log.Info("bind address", "address", cfg.SIP.BindAddr, "how", "configured")
-		return cfg.SIP.BindAddr, nil
+		return cfg.SIP.BindAddr, addrs, nil
 	}
 
-	bind, err := routeSourceAddr(registrar)
+	bind, err = routeSourceAddr(first)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("detect the bind address (set %s to choose it): %w", config.KeySIPBindAddr, err)
+		return netip.Addr{}, nil, fmt.Errorf("detect the bind address (set %s to choose it): %w", config.KeySIPBindAddr, err)
 	}
 	log.Info("bind address", "address", bind, "how", "detected from the route to the registrar")
-	return bind, nil
+	return bind, addrs, nil
 }
 
 // speechService describes one speech server for preflightService.

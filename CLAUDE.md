@@ -248,9 +248,16 @@ WAV next to choppy audio at the handset moves the fault to RTP delivery or the p
   `sip.Options.Ready` pings Kokoro and Whisper (300 ms at most) and checks that the model
   account has not been marked down. Otherwise the call gets `486` and goes to voicemail.
   Exhausted credit or a revoked key (402, 401, 403) marks the account down; a one-token
-  probe then runs at most once a minute, and the first success opens the door again. The
+  probe then runs at most once a minute, in the background (never inside the INVITE's
+  one-second budget), and its first success opens the door for the next call. The
   diagnostic modes have no such check: seeing the failure is their point.
-- **The registrar must resolve to a private address.** Use the S20's IP.
+- **SIP requests are accepted only from the S20.** `internal/sip` answers `403` to any
+  request whose packet source is not one of the registrar's addresses, resolved at startup,
+  so nothing else on the LAN can call Portunus behind the PBX's back: spending credit,
+  taking the call slots, or having audio streamed to an address of its choosing. It is
+  defense in depth: UDP sources can be forged, but then every answer goes to the S20.
+- **The registrar must resolve to a private address.** Use the S20's IP: a host name is
+  checked only at startup, and Portunus warns about it.
   `PORTUNUS_ALLOW_PUBLIC_REGISTRAR=true` is the explicit override.
 - **The User-Agent is fixed to `Portunus/<version>`**, so the S20's User Agent Registration
   Authorization can be turned on. This is only defense in depth, because a User-Agent can be
@@ -276,6 +283,9 @@ WAV next to choppy audio at the handset moves the fault to RTP delivery or the p
     by Portunus.
   - A ceiling ends the call gracefully: a short closing line, then BYE, never a cut
     mid-sentence. The message taken so far is still delivered.
+  - `PORTUNUS_MAX_CALL_TIME` is checked between turns. A turn stuck past it (a speech
+    server that stops answering mid-stream) is cut 30 s later by a hard ceiling on the
+    call's context: the only case in which a call ends mid-sentence.
   - If the API reports exhausted credit or quota, Portunus stops answering, so the S20 sends
     calls to its fallback instead of to a mute assistant.
   - The end-of-call log reports the tokens used (input, output, cache reads), so cost can be
@@ -312,6 +322,8 @@ worst they can do is waste a call.
 - **Prompt injection through speech** ("ignore your instructions…") can at worst make the
   model say something off-script to the very person who asked for it. The prompt keeps it
   on its task; the sanitizer and the lack of tools keep anything else from happening.
+  The model's text never carries TTS instructions: pause tags are stripped from every
+  reply, so a caller cannot talk it into "[pause:300s]" and a silent line.
 - **Callers must know they are talking to a machine** (EU AI Act transparency): the
   greeting says so before anything else, and it is fixed text, not generated.
 - **What callers say leaves the office for Claude** (Anthropic), as text. Audio stays
@@ -349,7 +361,10 @@ fault before suspecting a provider.
 - **Host:** a Linux x86-64 VM on the office vSphere, with a static IP.
 - **Service:** `deploy/portunus.service` (systemd, `EnvironmentFile`, `StateDirectory`).
 - **Network:** the VM either sits in the S20's subnet, or the firewall allows `5060/udp` and
-  the RTP range (`PORTUNUS_RTP_PORT_MIN`–`MAX`) between the VM and the S20.
+  the RTP range (`PORTUNUS_RTP_PORT_MIN`–`MAX`) between the VM and the S20. Either way, the
+  VM's own firewall accepts those ports from the S20's address only.
+- **Time zone:** the model is told the date and time in `PORTUNUS_TIME_ZONE`
+  (`Europe/Rome`), not in the VM's zone. The zone database is compiled into the binary.
 - **CPU:** the 20 ms pacer needs the CPU on time. If `starved_pct` rises while the providers
   are fast, check the VM's CPU Ready time in vSphere before blaming the network.
 - **Local services:** `deploy/compose.yaml` runs the optional local STT/TTS services.
@@ -390,7 +405,8 @@ fault before suspecting a provider.
   ("quattromilacinquecento…"), not digit by digit. `internal/speech` does Portunus's own
   Italian normalization before every sentence: numbers in words, phone numbers digit by
   digit in their groups, times, dates, amounts and e-mail addresses. Kokoro's inline pause
-  tags (`[pause:0.4s]`) are left untouched.
+  tags (`[pause:0.4s]`) are left untouched in the fixed texts, and the model is told the
+  greeting without them. They are stripped from the model's replies.
 - **It is weak on very short utterances** (fewer than 10–20 tokens), so the sentence splitter
   merges sentences shorter than 25 characters with the next one, and the holding phrases
   are a little longer than two words.
@@ -462,9 +478,11 @@ fault before suspecting a provider.
   assistant asks for a callback number anyway.
 - **The adapter keeps the history, thinking blocks included and unmodified**, as the API
   requires. A failed reply leaves the history as it was.
-- **This SDK version sends the key as `Authorization: Bearer`**, not `x-api-key`. It also
-  honors `ANTHROPIC_BASE_URL` and `ANTHROPIC_CUSTOM_HEADERS` from the environment: leave
-  them unset on the VM.
+- **This SDK version sends the key as `Authorization: Bearer`**, not `x-api-key`. Left to
+  itself it would also read `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS` and other
+  credentials from the environment, even with the key given explicitly. The adapter builds
+  its client with `option.WithoutEnvironmentDefaults()`, so only Portunus's config is in
+  effect, and a test proves it.
 - **Errors:** 401 and 403 are fatal at startup and mark the account down during calls; 402
   (`billing_error`) marks it down; a 400 mentioning "credit balance" is treated the same,
   as a best effort, because the SDK warns that error wording can change. `Models.Get`

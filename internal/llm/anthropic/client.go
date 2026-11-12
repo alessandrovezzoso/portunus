@@ -72,8 +72,18 @@ func New(opts Options) (*Client, error) {
 	}
 
 	ro := []option.RequestOption{
+		// Without this, the SDK still reads ANTHROPIC_BASE_URL and
+		// ANTHROPIC_CUSTOM_HEADERS from the process environment, even with
+		// the key given here: a stray export would send the key and every
+		// caller's words to another server. Portunus's configuration is the
+		// one in config, and nothing else.
+		option.WithoutEnvironmentDefaults(),
 		option.WithAPIKey(opts.APIKey),
 		option.WithRequestTimeout(requestTimeout),
+		// WithoutEnvironmentDefaults also drops the SDK's own HTTP client, so
+		// this replaces it: a server that accepts the request and never
+		// answers must not hold a turn for longer than a request may last.
+		option.WithHTTPClient(defaultHTTPClient()),
 	}
 	switch {
 	case opts.MaxRetries < 0:
@@ -103,6 +113,15 @@ func New(opts Options) (*Client, error) {
 			CacheControl: sdk.NewCacheControlEphemeralParam(),
 		},
 	}, nil
+}
+
+// defaultHTTPClient is the standard transport with a deadline on the response
+// headers. The body streams, so it has no overall timeout: requestTimeout and
+// the call's context bound it.
+func defaultHTTPClient() *http.Client {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ResponseHeaderTimeout = requestTimeout
+	return &http.Client{Transport: t}
 }
 
 const toolDiscipline = "When you use a tool, you may say a brief sentence first. " +
@@ -174,7 +193,8 @@ type Reply struct {
 }
 
 // Reply sends what the caller said and streams the answer to onText as it
-// arrives. On failure the history is left as it was.
+// arrives. On failure the history is left as it was, and the Reply carries
+// only the tokens already counted: a stream cut halfway is still billed.
 func (v *Conversation) Reply(ctx context.Context, callerText string, onText func(string)) (Reply, error) {
 	messages := append(v.history, sdk.NewUserMessage(sdk.NewTextBlock(callerText)))
 
@@ -205,7 +225,7 @@ func (v *Conversation) Reply(ctx context.Context, callerText string, onText func
 	for stream.Next() {
 		event := stream.Current()
 		if err := msg.Accumulate(event); err != nil {
-			return Reply{}, fmt.Errorf("llm: %w", err)
+			return usageOf(msg), fmt.Errorf("llm: %w", err)
 		}
 		if delta, ok := event.AsAny().(sdk.ContentBlockDeltaEvent); ok {
 			if t, ok := delta.Delta.AsAny().(sdk.TextDelta); ok && t.Text != "" {
@@ -214,16 +234,11 @@ func (v *Conversation) Reply(ctx context.Context, callerText string, onText func
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return Reply{}, classify(err)
+		return usageOf(msg), classify(err)
 	}
 
-	r := Reply{
-		Refused:          msg.StopReason == sdk.StopReasonRefusal,
-		InputTokens:      msg.Usage.InputTokens,
-		OutputTokens:     msg.Usage.OutputTokens,
-		CacheReadTokens:  msg.Usage.CacheReadInputTokens,
-		CacheWriteTokens: msg.Usage.CacheCreationInputTokens,
-	}
+	r := usageOf(msg)
+	r.Refused = msg.StopReason == sdk.StopReasonRefusal
 	var text strings.Builder
 	for _, block := range msg.Content {
 		switch b := block.AsAny().(type) {
@@ -239,6 +254,17 @@ func (v *Conversation) Reply(ctx context.Context, callerText string, onText func
 	// included and unmodified, as the API requires.
 	v.history = append(messages, msg.ToParam())
 	return r, nil
+}
+
+// usageOf returns a Reply holding only the token counts of msg, as far as the
+// stream got: the input at message_start, the output with each message_delta.
+func usageOf(msg sdk.Message) Reply {
+	return Reply{
+		InputTokens:      msg.Usage.InputTokens,
+		OutputTokens:     msg.Usage.OutputTokens,
+		CacheReadTokens:  msg.Usage.CacheReadInputTokens,
+		CacheWriteTokens: msg.Usage.CacheCreationInputTokens,
+	}
 }
 
 // Error is a failed request. Unavailable reports a failure no retry within a

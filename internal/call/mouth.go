@@ -101,8 +101,12 @@ func (r *spokenReply) push(text string) {
 	}
 }
 
+// send queues one sentence of the model's reply. Pause tags are stripped
+// first: they are instructions to the TTS, and only the fixed texts may give
+// them. Otherwise a caller could talk the model into writing "[pause:300s]"
+// and leave the line silent, with Kokoro busy producing that silence.
 func (r *spokenReply) send(sentence string) {
-	if p := prepare(sentence); p != "" {
+	if p := prepare(speech.StripPauses(sentence)); p != "" {
 		r.sentences <- p
 	}
 }

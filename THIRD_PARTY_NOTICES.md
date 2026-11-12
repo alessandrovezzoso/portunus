@@ -57,6 +57,11 @@ The list is the set of modules linked into `bin/portunus`, as reported by
 | golang.org/x/sys | v0.50.0 | BSD-3-Clause |
 | golang.org/x/time | v0.14.0 | BSD-3-Clause |
 
+The Go standard library and runtime are compiled into the binary as well,
+the time zone database (`time/tzdata`) included. They are BSD-3-Clause, by the
+Go Authors (`$(go env GOROOT)/LICENSE`), and a binary release must bundle that
+text too.
+
 ## Services that run alongside the binary
 
 These are not linked into `bin/portunus`. They run as separate processes, in

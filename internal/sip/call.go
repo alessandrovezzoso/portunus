@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -173,7 +174,7 @@ func (s *Server) handleInvite(ctx context.Context, d *diago.DialogServerSession,
 	start := time.Now()
 	log.Info("call answered", "codec", codec)
 
-	herr := h(callCtx, &Call{ID: callID, Caller: caller, Codec: codec, Inbound: in, Outbound: out})
+	herr := runHandler(callCtx, h, &Call{ID: callID, Caller: caller, Codec: codec, Inbound: in, Outbound: out})
 
 	attrs := []any{
 		"duration", time.Since(start).Round(time.Millisecond),
@@ -187,6 +188,19 @@ func (s *Server) handleInvite(ctx context.Context, d *diago.DialogServerSession,
 		return
 	}
 	log.Info("call ended", attrs...)
+}
+
+// runHandler runs h and turns a panic into an error. A bug that crashes one
+// call must not take the whole process down, and with it every other call in
+// progress. It only covers h's own goroutine: the goroutines a mode starts
+// are its own business.
+func runHandler(ctx context.Context, h Handler, c *Call) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("handler panicked: %v\n%s", r, debug.Stack())
+		}
+	}()
+	return h(ctx, c)
 }
 
 // ready runs Options.Ready, if set, within readyTimeout.

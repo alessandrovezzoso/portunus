@@ -2,6 +2,7 @@ package call
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -41,15 +42,23 @@ type AgentOptions struct {
 
 	Logger *slog.Logger
 
-	// For tests: the time a hangup waits for the last words to be heard, and
-	// how long after the assistant falls silent the ear stays muted.
-	tail     time.Duration
-	muteTail time.Duration
+	// For tests: the time a hangup waits for the last words to be heard, how
+	// long after the assistant falls silent the ear stays muted, and how far
+	// past MaxCallTime the hard ceiling sits.
+	tail      time.Duration
+	muteTail  time.Duration
+	hardGrace time.Duration
 }
 
 const (
 	defaultMaxCallTime = 5 * time.Minute
 	defaultMaxTurns    = 20
+	// defaultHardGrace is how long a turn may run past MaxCallTime before
+	// the call is cut. MaxCallTime itself is checked between turns, so the
+	// closing line is never cut; this backstop only fires when a turn is
+	// stuck (a speech server that stops answering mid-stream), and then a cut
+	// is the only way out.
+	defaultHardGrace = 30 * time.Second
 	// echoTail keeps the ear muted briefly after the assistant stops: the
 	// last syllable is still in the phone's jitter buffer, and its echo can
 	// come back after that.
@@ -99,6 +108,9 @@ func Agent(llm LLM, stt STT, tts TTS, newVAD func() (VAD, error), opts AgentOpti
 	if opts.muteTail <= 0 {
 		opts.muteTail = echoTail
 	}
+	if opts.hardGrace <= 0 {
+		opts.hardGrace = defaultHardGrace
+	}
 	segCfg := segmenterConfigFor(opts.VADThreshold, opts.VADSilence, opts.MaxUtterance)
 	// The TTS gets the greeting with its pause tags; the model gets the words.
 	heardGreeting := speech.StripPauses(opts.Greeting)
@@ -111,6 +123,10 @@ func Agent(llm LLM, stt STT, tts TTS, newVAD func() (VAD, error), opts AgentOpti
 			return fmt.Errorf("vad: %w", err)
 		}
 
+		// The hard ceiling bounds the call whatever is stuck inside it. The
+		// cancel below still ends it earlier, at hangup or after the goodbye.
+		ctx, cancelHard := context.WithTimeoutCause(ctx, opts.MaxCallTime+opts.hardGrace, errHardCeiling)
+		defer cancelHard()
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
 
@@ -222,13 +238,13 @@ func (a *agentCall) converse(ctx context.Context, answered time.Time) string {
 	for {
 		select {
 		case <-ctx.Done():
-			return endCaller
+			return a.interrupted(ctx)
 		case <-deadline.C:
 			a.log.Info("call time ceiling reached", "max_call_time", a.opts.MaxCallTime)
 			return a.close(ctx, lineClosing, endMaxCallTime)
 		case q, ok := <-a.ear.queue:
 			if !ok {
-				return endCaller
+				return a.interrupted(ctx)
 			}
 			if reason := a.turn(ctx, q); reason != "" {
 				return reason
@@ -246,7 +262,7 @@ func (a *agentCall) turn(ctx context.Context, q queued) string {
 	sttDur := time.Since(q.ended)
 	switch {
 	case ctx.Err() != nil:
-		return endCaller
+		return a.interrupted(ctx)
 	case err != nil:
 		a.log.Warn("transcription failed", "turn", q.turn, "error", err)
 		if err := a.m.say(ctx, lineNotUnderstood); err != nil {
@@ -254,7 +270,18 @@ func (a *agentCall) turn(ctx context.Context, q queued) string {
 		}
 		return ""
 	case text == "":
-		return "" // nothing intelligible: wait for the caller to go on
+		// Nothing intelligible: a noise, or a word Whisper could not make
+		// out. The holding phrase has already told the caller an answer is
+		// coming, so silence now would leave them hanging: ask again.
+		// Without a holding phrase nothing was said, and waiting is enough.
+		if len(a.opts.Holding) == 0 {
+			return ""
+		}
+		a.log.Info("nothing intelligible in the utterance", "turn", q.turn)
+		if err := a.m.say(ctx, lineNotUnderstood); err != nil {
+			return a.speechFailed(ctx, err)
+		}
+		return ""
 	}
 	a.sttTimes.add(sttDur)
 
@@ -275,10 +302,13 @@ func (a *agentCall) turn(ctx context.Context, q queued) string {
 		spoken.push(delta)
 	})
 	ttsFirst, onWire, speakErr := spoken.finish()
+	// Counted before anything else: a reply cut by a hangup or an error was
+	// billed all the same.
+	a.usage.add(reply.Usage)
 
 	switch {
 	case ctx.Err() != nil:
-		return endCaller
+		return a.interrupted(ctx)
 	case err != nil && unavailable(err):
 		a.log.Error("the model cannot serve calls: refusing calls until it can", "error", err)
 		if a.opts.OnUnavailable != nil {
@@ -290,7 +320,6 @@ func (a *agentCall) turn(ctx context.Context, q queued) string {
 		return a.close(ctx, lineTechnical, endLLMError)
 	}
 	a.replies++
-	a.usage.add(reply.Usage)
 
 	attrs := []any{
 		"turn", a.replies,
@@ -381,10 +410,24 @@ func (a *agentCall) close(ctx context.Context, line, reason string) string {
 // speechFailed ends a call that cannot be spoken to.
 func (a *agentCall) speechFailed(ctx context.Context, err error) string {
 	if ctx.Err() != nil {
-		return endCaller
+		return a.interrupted(ctx)
 	}
 	a.log.Error("speech synthesis failed", "error", err)
 	return endTTSError
+}
+
+// errHardCeiling is the cause of a call cut by the hard time ceiling.
+var errHardCeiling = errors.New("call cut by the hard time ceiling")
+
+// interrupted reports why the call's context ended: the hard ceiling, or the
+// caller hanging up (Portunus shutting down counts as that too).
+func (a *agentCall) interrupted(ctx context.Context) string {
+	if errors.Is(context.Cause(ctx), errHardCeiling) {
+		a.log.Warn("call cut: a turn was still running past the time ceiling",
+			"max_call_time", a.opts.MaxCallTime, "grace", a.opts.hardGrace)
+		return endMaxCallTime
+	}
+	return endCaller
 }
 
 // logSummary writes the end-of-call lines.

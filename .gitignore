@@ -1,5 +1,8 @@
 
 .env
+# Other env files (PORTUNUS_ENV_FILE can point at one) hold secrets too.
+.env.*
+!.env.example
 prompts/*
 !prompts/example.*
 recordings/
