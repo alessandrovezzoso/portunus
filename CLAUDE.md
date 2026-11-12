@@ -256,6 +256,13 @@ WAV next to choppy audio at the handset moves the fault to RTP delivery or the p
   so nothing else on the LAN can call Portunus behind the PBX's back: spending credit,
   taking the call slots, or having audio streamed to an address of its choosing. It is
   defense in depth: UDP sources can be forged, but then every answer goes to the S20.
+- **RTP is accepted only from the address in the S20's SDP.** diago reads RTP from
+  whoever sends it to the call's port, so `internal/sip` drops every packet from another
+  IP, which would otherwise put a stranger's words into the transcript. The address comes
+  from the trusted SDP, so the S20's IP is still configured once, in
+  `PORTUNUS_SIP_REGISTRAR`. Dropped packets are counted as `rtp_untrusted` on `call
+  ended`, with a warning naming the first source: if the caller is not heard at all, the
+  S20 is sending from an address other than its SDP's.
 - **The registrar must resolve to a private address.** Use the S20's IP: a host name is
   checked only at startup, and Portunus warns about it.
   `PORTUNUS_ALLOW_PUBLIC_REGISTRAR=true` is the explicit override.
@@ -368,6 +375,10 @@ fault before suspecting a provider.
 - **CPU:** the 20 ms pacer needs the CPU on time. If `starved_pct` rises while the providers
   are fast, check the VM's CPU Ready time in vSphere before blaming the network.
 - **Local services:** `deploy/compose.yaml` runs the optional local STT/TTS services.
+  They have no authentication, and publishing their ports on `127.0.0.1` is what keeps
+  them private, so `make tts-up` and `make stt-up` refuse Docker Engine older than 28.3.3:
+  before 28.0, hosts on the same LAN segment could reach such ports, and 28.2.0–28.3.2
+  could again after a firewalld reload (CVE-2025-54388).
 - **Development:** on macOS (Apple Silicon).
 
 ## Yeastar S20 notes

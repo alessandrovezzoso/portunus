@@ -166,9 +166,12 @@ func (s *Server) handleInvite(ctx context.Context, d *diago.DialogServerSession,
 		return
 	}
 
+	// Only the address the PBX named in its SDP may speak into the call.
+	peer := &mediaFromPeer{r: inbound, sess: med.MediaSession()}
+
 	// The frame counters sit here, at the RTP boundary, so every mode gets
 	// the same end-of-call numbers without counting anything itself.
-	in := &countingReader{r: inbound}
+	in := &countingReader{r: peer}
 	out := &countingWriter{w: outbound}
 
 	start := time.Now()
@@ -182,6 +185,14 @@ func (s *Server) handleInvite(ctx context.Context, d *diago.DialogServerSession,
 		"frames_in", in.frames.Load(),
 		"frames_out", out.frames.Load(),
 		"lost_pct", loss.lostPct(),
+		"rtp_untrusted", peer.dropped.Load(),
+	}
+	if n := peer.dropped.Load(); n > 0 {
+		// Either someone else sent RTP to this call's port, or the PBX sends
+		// from an address other than the one in its SDP; the caller is then
+		// not heard at all, and this line says why.
+		log.Warn("RTP from an unexpected address was dropped",
+			"packets", n, "first_source", peer.firstSource(), "expected", med.MediaSession().Raddr.IP)
 	}
 	if herr != nil {
 		log.Error("call ended with an error", append(attrs, "error", herr)...)

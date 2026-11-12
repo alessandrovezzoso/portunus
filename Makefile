@@ -14,7 +14,7 @@ GOBUILD := CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)"
 
 COMPOSE := docker compose -f deploy/compose.yaml
 
-.PHONY: build build-linux-amd64 build-linux-arm64 check lint integration echo greet listen agent run tts-up tts-down stt-up stt-down clean
+.PHONY: build build-linux-amd64 build-linux-arm64 check lint integration echo greet listen agent run docker-check tts-up tts-down stt-up stt-down clean
 
 build:
 	$(GOBUILD) -o bin/$(BINARY) $(PKG)
@@ -59,8 +59,21 @@ listen: build
 agent: build
 	./bin/$(BINARY) -mode agent
 
+# Kokoro and Whisper have no authentication: publishing their ports on
+# 127.0.0.1 is what keeps them private. Docker before 28.0 let hosts on the
+# same LAN segment reach such ports anyway, and 28.2.0 to 28.3.2 did again
+# after a firewalld reload (CVE-2025-54388), so older engines are refused.
+DOCKER_MIN := 28.3.3
+
+docker-check:
+	@v=$$(docker version --format '{{.Server.Version}}') || exit 1; \
+	if [ "$$(printf '%s\n' $(DOCKER_MIN) "$$v" | sort -V | head -n 1)" != "$(DOCKER_MIN)" ]; then \
+		echo "Docker Engine $$v is older than $(DOCKER_MIN): upgrade it before starting Kokoro and Whisper."; \
+		exit 1; \
+	fi
+
 # The local speech services (deploy/compose.yaml), listening on 127.0.0.1.
-tts-up:
+tts-up: docker-check
 	$(COMPOSE) up -d kokoro
 
 tts-down:
@@ -68,7 +81,7 @@ tts-down:
 
 # The first run compiles whisper.cpp and downloads the model (574 MB), so it
 # takes a few minutes. Later runs reuse the built image.
-stt-up:
+stt-up: docker-check
 	$(COMPOSE) up -d --build whisper
 
 stt-down:
