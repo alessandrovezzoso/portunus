@@ -200,7 +200,7 @@ chiamata. Niente viene ricordato da una chiamata all'altra.
   Apple Silicon va bene per lo sviluppo.
 - **Go 1.27.4** o successivo, per compilare. Il binario è statico e non ha bisogno di
   niente di installato.
-- **Docker** con Compose, per Kokoro e Whisper: come installarli e avviarli è spiegato in
+- **Docker Engine 28.3.3** o successivo, con Compose, per Kokoro e Whisper: come installarli e avviarli è spiegato in
   [I server della voce](#i-server-della-voce-kokoro-e-whisper). Whisper viene compilato
   sulla macchina che lo usa, sfruttando tutte le istruzioni della sua CPU: compilatelo lì,
   non copiate mai l'immagine.
@@ -254,6 +254,13 @@ Le misure sono state prese sul Mac di sviluppo; sulla VM saranno simili.
   Per usare `docker` senza `sudo`, aggiungete il vostro utente al gruppo `docker` (`sudo
   usermod -aG docker $USER`, poi rientrate). Quel gruppo vale quanto root: datelo solo a
   chi amministra la VM.
+
+  I pacchetti delle distribuzioni possono essere più vecchi di quelli di Docker. `make
+  tts-up` e `make stt-up` rifiutano un Docker Engine più vecchio della 28.3.3: Kokoro e
+  Whisper non hanno autenticazione, e le versioni precedenti potevano rendere
+  raggiungibili da altri computer della rete le porte pubblicate su `127.0.0.1` (prima
+  della 28.0, e dalla 28.2.0 alla 28.3.2 dopo un reload di firewalld,
+  [CVE-2025-54388](https://nvd.nist.gov/vuln/detail/CVE-2025-54388)).
 
 Controllate che Compose ci sia:
 
@@ -690,6 +697,9 @@ mandato a Claude.
   istruzioni per la sintesi vocale.
 - **I numeri di chi chiama sono mascherati** a livello info (`***123`), e le trascrizioni
   compaiono solo a livello debug.
+- **L'audio delle chiamate (RTP) viene accettato solo dall'indirizzo che l'S20 indica nel
+  suo SDP.** I pacchetti che arrivano da altrove vengono scartati: nessuno nella rete
+  locale può parlare dentro una chiamata.
 - **Kokoro e Whisper** ascoltano solo su `127.0.0.1`, girano con utenti senza privilegi,
   senza permessi Linux, da immagini bloccate per digest o per commit.
 
@@ -740,8 +750,9 @@ Ogni chiamata finisce con:
   modalità agent `ignored_utterances` (voce mentre parlava l'assistente) e
   `dropped_utterances` (frasi perse perché Whisper era troppo indietro).
 - **`call latency`**: i tempi di ogni passaggio, riassunti per la chiamata.
-- **`call ended`**: durata, pacchetti in ingresso e in uscita, e `lost_pct`, la perdita di
-  RTP in ingresso sulla rete, prima di Portunus.
+- **`call ended`**: durata, pacchetti in ingresso e in uscita, `lost_pct`, la perdita di
+  RTP in ingresso sulla rete, prima di Portunus, e `rtp_untrusted`, i pacchetti RTP
+  scartati perché non arrivavano dall'S20.
 
 In modalità agent, in più:
 
@@ -767,6 +778,7 @@ A livello debug, `turn text` mostra le due parti di ogni turno.
 | | `request refused: not from the PBX` | Un dispositivo diverso dall'S20 manda richieste SIP, oppure l'S20 usa un altro indirizzo di partenza. |
 | Portunus non parte | `rejected the key or the model` | Controllate `ANTHROPIC_API_KEY` (confrontate l'impronta) e `PORTUNUS_LLM_MODEL`. |
 | Dopo un po' le chiamate non ricevono più risposta | `the model cannot serve calls` | Credito esaurito o chiave revocata. Ricaricate; Portunus riprova una volta al minuto e scrive `model available again`. |
+| Portunus non sente per niente chi chiama | `RTP from an unexpected address was dropped` | L'S20 manda l'audio da un indirizzo diverso da quello del suo SDP, oppure un altro computer manda RTP a Portunus. L'avviso riporta entrambi gli indirizzi. |
 | Audio a scatti | `starved_pct` alto, `lost_pct` vicino a 0 | La catena non tiene il passo: controllate la CPU della VM (CPU Ready in vSphere) prima della rete. |
 | | `lost_pct` alto | Pacchetti persi sulla rete, prima di Portunus. |
 | Log a posto, audio brutto al telefono | — | Il guasto è nella consegna dell'RTP o nel telefono, non in Portunus. |
