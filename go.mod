@@ -5,6 +5,7 @@ go 1.27.4
 require (
 	github.com/emiago/diago v0.42.1
 	github.com/emiago/sipgo v1.7.2
+	github.com/zserge/govad v0.0.0-20260330155402-74750eabf3a4
 )
 
 require (

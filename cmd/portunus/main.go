@@ -17,15 +17,30 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/alessandrovezzoso/portunus/internal/call"
 	"github.com/alessandrovezzoso/portunus/internal/config"
 	"github.com/alessandrovezzoso/portunus/internal/sip"
-	"github.com/alessandrovezzoso/portunus/internal/tts/openaicompat"
+	sttapi "github.com/alessandrovezzoso/portunus/internal/stt/openaicompat"
+	ttsapi "github.com/alessandrovezzoso/portunus/internal/tts/openaicompat"
+	"github.com/alessandrovezzoso/portunus/internal/vad/silero"
 )
 
 // version is set at build time by the Makefile (-ldflags "-X main.version=...").
 var version = "dev"
+
+// callerLanguage is what callers speak. CLAUDE.md fixes it: every adapter and
+// prompt is judged on Italian, so it is not a setting.
+const callerLanguage = "it"
+
+// The preflight checks of the speech servers. The STT check runs a real
+// transcription, which on a CPU takes seconds, and the first one after the
+// server starts is the slowest.
+const (
+	ttsCheckTimeout = 5 * time.Second
+	sttCheckTimeout = time.Minute
+)
 
 func main() {
 	if err := run(); err != nil {
@@ -122,7 +137,7 @@ func handlerFor(ctx context.Context, cfg *config.Config, log *slog.Logger) (sip.
 		}
 		log.Info("greeting loaded", "file", cfg.GreetingFile, "characters", len([]rune(greeting)))
 
-		tts, err := openaicompat.New(openaicompat.Options{
+		tts, err := ttsapi.New(ttsapi.Options{
 			BaseURL: cfg.TTS.URL,
 			Model:   cfg.TTS.Model,
 			Voice:   cfg.TTS.Voice,
@@ -130,14 +145,46 @@ func handlerFor(ctx context.Context, cfg *config.Config, log *slog.Logger) (sip.
 		if err != nil {
 			return nil, err
 		}
-		preflightTTS(ctx, tts, cfg.TTS.URL, log)
+		preflightService(ctx, speechService{
+			name: "TTS", url: cfg.TTS.URL, check: tts.Check, timeout: ttsCheckTimeout,
+			leaves: "the text sent to it", start: "make tts-up",
+		}, log)
 
 		return call.Greet(tts, greeting, call.GreetOptions{
 			OutputBuffer: cfg.OutputBuffer,
 			Logger:       log,
 		}), nil
+
+	case config.ModeListen:
+		stt, err := sttapi.New(sttapi.Options{
+			BaseURL:  cfg.STT.URL,
+			Model:    cfg.STT.Model,
+			Language: callerLanguage,
+		})
+		if err != nil {
+			return nil, err
+		}
+		preflightService(ctx, speechService{
+			name: "STT", url: cfg.STT.URL, check: stt.Check, timeout: sttCheckTimeout,
+			leaves: "the callers' voice", start: "make stt-up",
+		}, log)
+
+		// The VAD runs in this process with embedded weights, so failing to
+		// load it means a broken binary: that is fatal, unlike a server that
+		// may still be starting.
+		if _, err := silero.New(); err != nil {
+			return nil, err
+		}
+		newVAD := func() (call.VAD, error) { return silero.New() }
+
+		return call.Listen(stt, newVAD, call.ListenOptions{
+			VADThreshold: float32(cfg.VAD.Threshold),
+			VADSilence:   cfg.VAD.Silence,
+			MaxUtterance: cfg.STT.MaxUtterance,
+			Logger:       log,
+		}), nil
 	}
-	return nil, fmt.Errorf("mode %q is not implemented yet: this milestone has echo and greet", cfg.Mode)
+	return nil, fmt.Errorf("mode %q is not implemented yet: this milestone has echo, greet and listen", cfg.Mode)
 }
 
 // readGreeting reads the greet-mode text. A missing or empty file is fatal:

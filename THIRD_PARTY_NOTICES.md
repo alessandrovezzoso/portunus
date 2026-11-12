@@ -33,6 +33,7 @@ The list is the set of modules linked into `bin/portunus`, as reported by
 | github.com/pion/turn/v5 | v5.0.12 | MIT |
 | github.com/wlynxg/anet | v0.0.5 | BSD-3-Clause |
 | github.com/zaf/g711 | v1.4.0 | BSD-3-Clause |
+| github.com/zserge/govad | v0.0.0-20260330155402-74750eabf3a4 | MIT (it embeds the Silero VAD v5 weights, MIT, github.com/snakers4/silero-vad) |
 | golang.org/x/crypto | v0.59.0 | BSD-3-Clause |
 | golang.org/x/net | v0.62.0 | BSD-3-Clause |
 | golang.org/x/sync | v0.16.0 | BSD-3-Clause |
@@ -52,6 +53,8 @@ runs sit in one place.
 | Kokoro-82M model weights (huggingface.co/hexgrad/Kokoro-82M) | as bundled by the image | Apache-2.0 | the TTS model and its Italian voice `if_sara` |
 | eSpeak NG (github.com/espeak-ng/espeak-ng) | 1.52.0, inside the image | GPL-3.0-or-later | turns Italian text into phonemes for Kokoro |
 | phonemizer-fork (Python package) | 3.3.2, inside the image | GPL-3.0-or-later | Kokoro's bridge to eSpeak NG |
+| whisper.cpp (github.com/ggml-org/whisper.cpp) | v1.9.5, built by `deploy/whisper/Dockerfile` | MIT | HTTP server for the STT |
+| Whisper large-v3-turbo weights, ggml q5_0 (huggingface.co/ggerganov/whisper.cpp) | revision 5359861c | MIT | the STT model |
 
 ## Notes
 
@@ -63,6 +66,9 @@ runs sit in one place.
   it text over HTTP, so the GPL does not reach this repository. It must never be
   linked into `bin/portunus` (through cgo, for example), because the binary
   would then have to be GPL.
+- **govad and the Silero weights (MIT).** The weights are compiled into
+  `bin/portunus` (about 1.2 MB), so a binary release carries both licences:
+  govad's and Silero's.
 - **Opus.** diago's cgo Opus binding (`gopkg.in/hraban/opus.v2`, MIT) appears in
   `go.sum`, but it sits behind the `with_opus_c` build tag. It is not compiled
   or linked, which keeps the binary pure Go.

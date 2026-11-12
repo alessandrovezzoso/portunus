@@ -66,33 +66,45 @@ func preflight(ctx context.Context, cfg *config.Config, log *slog.Logger) (netip
 	return bind, nil
 }
 
-// preflightTTS checks the speech server before the first call. Nothing here
+// speechService describes one speech server for preflightService.
+type speechService struct {
+	name    string // "TTS" or "STT", for the log
+	url     string
+	check   func(context.Context) error
+	timeout time.Duration
+	// leaves says what would leave the office if the server were remote.
+	leaves string
+	// start says how to start the local server.
+	start string
+}
+
+// preflightService checks a speech server before the first call. Nothing here
 // is fatal: an unreachable server is a warning, as CLAUDE.md asks, because it
 // may still be starting up.
-func preflightTTS(ctx context.Context, tts interface{ Check(context.Context) error }, rawURL string, log *slog.Logger) {
-	if u, err := url.Parse(rawURL); err == nil {
+func preflightService(ctx context.Context, s speechService, log *slog.Logger) {
+	if u, err := url.Parse(s.url); err == nil {
 		rctx, cancel := context.WithTimeout(ctx, resolveTimeout)
 		addrs, err := resolveHost(rctx, u.Hostname())
 		cancel()
 		switch {
 		case err != nil:
-			log.Warn("TTS host does not resolve", "host", u.Hostname(), "error", err)
+			log.Warn(s.name+" host does not resolve", "host", u.Hostname(), "error", err)
 		case len(leavesLAN(addrs)) > 0:
-			// Kokoro runs on this host. A remote TTS would send every word
-			// the assistant says, and later what callers said, out of the
-			// office.
-			log.Warn("TTS server is outside this host and the LAN: text sent to it leaves the office",
-				"url", rawURL, "addresses", leavesLAN(addrs))
+			// Kokoro and Whisper run on this host. A remote server would
+			// receive what the assistant says or what callers say.
+			log.Warn(s.name+" server is outside this host and the LAN: "+s.leaves+" leaves the office",
+				"url", s.url, "addresses", leavesLAN(addrs))
 		}
 	}
 
-	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	cctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-	if err := tts.Check(cctx); err != nil {
-		log.Warn("TTS server not reachable; calls will fail until it is (make tts-up)", "url", rawURL, "error", err)
+	start := time.Now()
+	if err := s.check(cctx); err != nil {
+		log.Warn(s.name+" server not reachable; calls will fail until it is ("+s.start+")", "url", s.url, "error", err)
 		return
 	}
-	log.Info("TTS server reachable", "url", rawURL)
+	log.Info(s.name+" server ready", "url", s.url, "check_ms", time.Since(start).Milliseconds())
 }
 
 // leavesLAN returns the addresses that are neither on this host (loopback)

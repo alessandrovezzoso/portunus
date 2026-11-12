@@ -47,6 +47,11 @@ type Call struct {
 	Outbound io.Writer
 }
 
+// InboundBufSize is the buffer a Read on Call.Inbound needs: one full RTP
+// packet. diago allocates and copies on every Read into anything smaller.
+// It is a variable only because diago's is.
+var InboundBufSize = media.RTPBufSize
+
 // Handler runs one answered call. It must return once ctx is cancelled or
 // Inbound reports an error; the call is hung up when it returns.
 type Handler func(ctx context.Context, c *Call) error
@@ -138,7 +143,12 @@ func (s *Server) handleInvite(ctx context.Context, d *diago.DialogServerSession,
 		log.Error("unexpected codec", "error", err)
 		return
 	}
-	inbound, err := med.AudioReader()
+	// diago's statistics hook runs after every inbound read and feeds the
+	// loss counter reported when the call ends.
+	loss := &lossCounter{}
+	inbound, err := med.AudioReader(diago.WithAudioReaderRTPStats(func(st media.RTPReadStats) {
+		loss.observe(st.FirstPktSequenceNumber, st.LastSequenceNumber, st.PacketsCount)
+	}))
 	if err != nil {
 		log.Error("opening inbound audio failed", "error", err)
 		return
@@ -164,6 +174,7 @@ func (s *Server) handleInvite(ctx context.Context, d *diago.DialogServerSession,
 		"codec", codec,
 		"frames_in", in.frames.Load(),
 		"frames_out", out.frames.Load(),
+		"lost_pct", loss.lostPct(),
 	}
 	if herr != nil {
 		log.Error("call ended with an error", append(attrs, "error", herr)...)

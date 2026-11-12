@@ -47,6 +47,12 @@ const (
 	KeyTTSVoice     = "PORTUNUS_TTS_VOICE"
 	KeyOutputBuffer = "PORTUNUS_OUTPUT_BUFFER"
 	KeyGreetingFile = "PORTUNUS_GREETING_FILE"
+
+	KeySTTURL          = "PORTUNUS_STT_URL"
+	KeySTTModel        = "PORTUNUS_STT_MODEL"
+	KeySTTMaxUtterance = "PORTUNUS_STT_MAX_UTTERANCE"
+	KeyVADThreshold    = "PORTUNUS_VAD_THRESHOLD"
+	KeyVADSilence      = "PORTUNUS_VAD_SILENCE"
 )
 
 // knownKeys lists every PORTUNUS_ variable this version understands. Anything
@@ -59,6 +65,7 @@ var knownKeys = []string{
 	KeyRTPPortMin, KeyRTPPortMax,
 	KeyMaxConcurrentCalls, KeyRingDelay, KeyAllowPublicRegistrar,
 	KeyTTSURL, KeyTTSModel, KeyTTSVoice, KeyOutputBuffer, KeyGreetingFile,
+	KeySTTURL, KeySTTModel, KeySTTMaxUtterance, KeyVADThreshold, KeyVADSilence,
 }
 
 const keyPrefix = "PORTUNUS_"
@@ -120,6 +127,9 @@ type Config struct {
 	// which git ignores, because the real text names the office.
 	GreetingFile string
 
+	STT STT
+	VAD VAD
+
 	values  map[string]string // effective value of each setting, for Summary
 	sources map[string]Source
 }
@@ -149,6 +159,29 @@ type TTS struct {
 	Voice string
 }
 
+// STT points at the speech recognition service: a server speaking the
+// OpenAI-style /v1/audio/transcriptions API, whisper.cpp by default.
+type STT struct {
+	URL   string
+	Model string
+	// MaxUtterance cuts longer speech into pieces. It must fit the server's
+	// input window, or the end of each long utterance is silently lost: about
+	// 10 s with the --audio-ctx 512 that deploy/compose.yaml sets, 30 s with
+	// Whisper's full window.
+	MaxUtterance time.Duration
+}
+
+// VAD tunes the detection of the caller's speech.
+type VAD struct {
+	// Threshold is the speech probability at which an utterance starts.
+	// Raising it is the fix for a handset that echoes the assistant back.
+	Threshold float64
+	// Silence is how long the caller must pause for an utterance to end.
+	// Every turn waits this long before the STT starts, so it is the main
+	// latency knob on the listening side.
+	Silence time.Duration
+}
+
 const defaultSIPPort = 5060
 
 // Load builds a Config from in. It returns the warnings worth logging (unknown
@@ -176,6 +209,15 @@ func Load(in Inputs) (*Config, []string, error) {
 		},
 		OutputBuffer: l.duration(KeyOutputBuffer, 10*time.Second),
 		GreetingFile: l.string(KeyGreetingFile, "prompts/greeting.txt"),
+		STT: STT{
+			URL:          l.string(KeySTTURL, "http://127.0.0.1:8890"),
+			Model:        l.string(KeySTTModel, "large-v3-turbo"),
+			MaxUtterance: l.duration(KeySTTMaxUtterance, 9500*time.Millisecond),
+		},
+		VAD: VAD{
+			Threshold: l.float(KeyVADThreshold, 0.5),
+			Silence:   l.duration(KeyVADSilence, 700*time.Millisecond),
+		},
 	}
 	cfg.SIP.AuthUser = l.string(KeySIPAuthUser, cfg.SIP.Extension)
 	cfg.LogLevel = l.logLevel(KeyLogLevel, slog.LevelInfo)
@@ -228,13 +270,32 @@ func (c *Config) validate() []error {
 		add("%s must not be negative", KeyRingDelay)
 	}
 
-	if u, err := url.Parse(c.TTS.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		add("%s: %q is not an http(s) URL", KeyTTSURL, c.TTS.URL)
+	for _, s := range []struct{ key, url string }{{KeyTTSURL, c.TTS.URL}, {KeySTTURL, c.STT.URL}} {
+		if u, err := url.Parse(s.url); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			add("%s: %q is not an http(s) URL", s.key, s.url)
+		}
 	}
 	// A second of audio is the shortest sentence worth saying; below that,
 	// replies would be cut before they start.
 	if c.OutputBuffer < time.Second {
 		add("%s must be at least 1s (it must hold a whole reply)", KeyOutputBuffer)
+	}
+
+	// Whisper's window is 30 s at most; under 2 s, ordinary sentences would be
+	// chopped into fragments.
+	if c.STT.MaxUtterance < 2*time.Second || c.STT.MaxUtterance > 29*time.Second {
+		add("%s: %v is outside 2s to 29s", KeySTTMaxUtterance, c.STT.MaxUtterance)
+	}
+
+	// Outside this range the VAD either hears speech in line noise or misses
+	// quiet callers altogether.
+	if c.VAD.Threshold < 0.1 || c.VAD.Threshold > 0.95 {
+		add("%s: %v is outside 0.1 to 0.95", KeyVADThreshold, c.VAD.Threshold)
+	}
+	// Under 200 ms, a breath between two words ends the utterance; over 3 s,
+	// the caller waits too long for every answer.
+	if c.VAD.Silence < 200*time.Millisecond || c.VAD.Silence > 3*time.Second {
+		add("%s: %v is outside 200ms to 3s", KeyVADSilence, c.VAD.Silence)
 	}
 	return errs
 }
@@ -345,6 +406,19 @@ func (l *loader) int(key string, def int) int {
 		return def
 	}
 	return n
+}
+
+func (l *loader) float(key string, def float64) float64 {
+	v, ok := l.raw(key, strconv.FormatFloat(def, 'f', -1, 64))
+	if !ok {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		l.fail(key, v, errors.New("not a number (for example 0.5)"))
+		return def
+	}
+	return f
 }
 
 func (l *loader) bool(key string, def bool) bool {

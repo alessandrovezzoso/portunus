@@ -14,7 +14,7 @@ GOBUILD := CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)"
 
 COMPOSE := docker compose -f deploy/compose.yaml
 
-.PHONY: build build-linux-amd64 build-linux-arm64 check lint integration echo greet run tts-up tts-down clean
+.PHONY: build build-linux-amd64 build-linux-arm64 check lint integration echo greet listen run tts-up tts-down stt-up stt-down clean
 
 build:
 	$(GOBUILD) -o bin/$(BINARY) $(PKG)
@@ -35,9 +35,11 @@ lint:
 	golangci-lint run
 
 # Tests against real services. They carry the "integration" build tag. The TTS
-# test needs the local Kokoro running: make tts-up first.
+# test needs the local Kokoro (make tts-up); the STT test needs both Kokoro and
+# Whisper (make stt-up). -p 1 runs one package at a time: the local servers
+# handle one request at a time, so parallel packages would only queue on them.
 integration:
-	go test -race -tags integration ./...
+	go test -race -tags integration -p 1 ./...
 
 # Milestone 0: answer and echo the caller's audio back. The flag beats .env.
 echo: build
@@ -47,12 +49,25 @@ echo: build
 greet: build
 	./bin/$(BINARY) -mode greet
 
+# Milestone 2: answer, stay silent, transcribe the caller. Needs make stt-up.
+# Transcripts appear only with PORTUNUS_LOG_LEVEL=debug.
+listen: build
+	./bin/$(BINARY) -mode listen
+
 # The local speech services (deploy/compose.yaml), listening on 127.0.0.1.
 tts-up:
 	$(COMPOSE) up -d kokoro
 
 tts-down:
-	$(COMPOSE) down
+	$(COMPOSE) stop kokoro
+
+# The first run compiles whisper.cpp and downloads the model (574 MB), so it
+# takes a few minutes. Later runs reuse the built image.
+stt-up:
+	$(COMPOSE) up -d --build whisper
+
+stt-down:
+	$(COMPOSE) stop whisper
 
 # Run in the mode set in .env.
 run: build

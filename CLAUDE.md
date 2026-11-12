@@ -26,12 +26,15 @@ make build-linux-amd64  # the production host
 make build-linux-arm64
 make check              # go vet + go test -race ./... + govulncheck
 make lint               # golangci-lint
-make integration        # tests against real services; the TTS test needs make tts-up
+make integration        # tests against real services; needs make tts-up and make stt-up
 make echo               # run in echo mode (milestone 0)
 make greet              # run in greet mode (milestone 1); needs make tts-up
+make listen             # run in listen mode (milestone 2); needs make stt-up
 make run                # run with the mode set in .env
-make tts-up             # start the local speech services (deploy/compose.yaml)
-make tts-down           # stop them
+make tts-up             # start Kokoro (deploy/compose.yaml)
+make tts-down           # stop it
+make stt-up             # build and start Whisper; the first build takes minutes
+make stt-down           # stop it
 ```
 
 Run a single test: `go test ./internal/media/ -run TestPacerSendsFullFramesAndPadsWithSilence -v`
@@ -62,8 +65,9 @@ STT → Claude → TTS. Latency is the central problem of this project, so every
 
 **Providers are pluggable.** `internal/call` depends only on the `STT`, `LLM`, `TTS` and
 `VAD` interfaces. `cmd/portunus` picks the adapters from config, and adapters never import
-`internal/call`. Local engines (Kokoro for TTS today, a local STT later) run as separate
-HTTP services, so this binary stays pure Go with no cgo.
+`internal/call`. Local engines (Kokoro for TTS, whisper.cpp for STT) run as separate HTTP
+services, so this binary stays pure Go with no cgo. The VAD is the exception: Silero is
+small enough to run in process, through govad, a pure Go implementation.
 
 **Callers speak Italian, on narrowband phone audio.** Every STT/TTS adapter and every prompt
 is judged on Italian 8 kHz telephone audio, not on English demos.
@@ -81,7 +85,10 @@ Call flow, end to end:
 4. `internal/call` runs the session, and `internal/notify` gets the result.
 
 Each call runs three goroutines, all cancelled by a shared context:
-1. **inbound**: RTP read → G.711 decode → resample → VAD and STT.
+1. **inbound**: RTP read → G.711 decode → resample → VAD → segmenter. Finished utterances go
+   to a transcriber goroutine through a short queue, so a slow STT delays transcripts but
+   never the RTP read. An utterance captured before a hangup is still transcribed, within a
+   drain deadline, because the last phrase is often the one that matters.
 2. **outbound pacer**: writes exactly one frame every 20 ms. The 20 ms clock is diago's RTP
    writer, whose every `Write` blocks until its next tick. The pacer feeds it one frame per
    `Write`, and silence when its queue is empty.
@@ -102,8 +109,9 @@ remembered across calls.
 
 - **Sample formats live only in `internal/media`.** The SIP leg is G.711 at 8 kHz. Adapters
   consume and produce PCM16 at the rate they declare. `internal/media` does every decode,
-  encode and resample, and no other package touches sample formats or rates. If you are
-  about to resample anywhere else, stop.
+  encode and resample, and no other package touches sample formats or rates. That includes
+  the float conversion a model needs (`media.ToFloat32`) and the WAV container an STT
+  upload needs (`media.EncodeWAV`). If you are about to resample anywhere else, stop.
 - **The output pacer is where call quality lives.** TTS emits audio in bursts, often faster
   than realtime, while RTP needs one 160-byte frame every 20 ms. The buffer absorbs the
   burst, the 20 ms clock drains it, and encoded silence pads underruns (`0xD5` A-law,
@@ -180,21 +188,26 @@ remembered across calls.
 ## Diagnostics: logs, not transcripts
 
 The transcript records what was said, not what the caller heard, so it can look perfect
-even when the audio was terrible. Every call ends with two log lines:
+even when the audio was terrible. Every call ends with these log lines:
 
-- `call audio quality`:
+- `call audio quality`, in the modes that speak:
   - `starved_pct`: padding during an utterance, meaning the pipeline could not keep up with
     the RTP clock.
   - `dropped_bytes`: audio lost to buffer overflow.
   - `barge_ins` and `self_barge_ins`.
-  - inbound RTP `lost_pct`: loss on the wire, downstream of this process.
 - `call latency`, per turn:
-  - `stt_ms`: end of speech → final transcript.
+  - `stt_ms`: from the VAD deciding the utterance is over to the final transcript. The
+    caller waits `PORTUNUS_VAD_SILENCE` more than this, because the VAD needs that much
+    silence to decide.
   - `llm_first_token_ms`.
   - `tts_first_audio_ms`.
   - `first_audio_ms`: end of speech → first frame on the wire.
 
-  With three stages, "it's slow" cannot be diagnosed without per-stage numbers.
+  With three stages, "it's slow" cannot be diagnosed without per-stage numbers. In listen
+  mode each utterance gets its own `utterance` line (`speech_ms`, `stt_ms`, `chars`), and
+  `call latency` sums them up (`turns`, `stt_ms_avg`, `stt_ms_max`).
+- `call ended`, written by `internal/sip` in every mode: duration, frames in and out, and
+  inbound RTP `lost_pct`, the loss on the wire before this process.
 
 When recording is enabled, the WAV is tapped inside the process, before the wire. A clean
 WAV next to choppy audio at the handset moves the fault to RTP delivery or the phone.
@@ -216,7 +229,9 @@ WAV next to choppy audio at the handset moves the fault to RTP delivery or the p
   spoofed. The S20's IP restriction is the real control.
 - **Callers are third parties.**
   - Recordings and transcripts are opt-in: an empty directory setting disables them.
-  - Transcript text and audio never go into logs.
+  - Transcript text and audio never go into logs at info level. The listen mode logs
+    transcripts at debug level only, like full caller numbers, so they can be checked
+    against what was said during a test.
   - Caller numbers are masked at info level (`***123`) and appear in full only at debug.
 - **Cost ceilings are features, not niceties.** The Messages API is stateless, so every turn
   resends the whole conversation and a long call costs more per turn. The real risk is not a
@@ -256,7 +271,7 @@ Each early milestone stays available as a diagnostic mode (`PORTUNUS_MODE`, or `
 |----------|---------------------------------------------------------------|---------------|
 | `echo`   | REGISTER, SDP, codec negotiation, RTP in both directions      | SIP only      |
 | `greet`  | TTS → resample → encode → pacer: the caller hears a greeting  | TTS           |
-| `listen` | VAD + STT: transcripts in the log, the assistant stays silent | STT           |
+| `listen` | VAD + STT: transcripts at debug level, the assistant silent   | STT           |
 | `agent`  | the full conversation                                         | STT, LLM, TTS |
 
 The cost ceilings (`max_tokens`, `PORTUNUS_MAX_CALL_TIME`, `PORTUNUS_MAX_TURNS`) ship with
@@ -326,6 +341,52 @@ fault before suspecting a provider.
 - **Speed:** about 9× real time on an M3 Pro CPU, and slower on the first synthesis after
   start. Measure the VM's CPU before deploying.
 
+## Whisper notes
+
+- **It runs as whisper.cpp's server in a container built locally** (`deploy/whisper/
+  Dockerfile`), not pulled. The whisper.cpp release and the model file are pinned there, and
+  the model's sha256 is verified. The build uses every instruction of the CPU it runs on
+  (`GGML_NATIVE`), so build the image on the host that runs it and never push it. The port
+  is `127.0.0.1:8890`. `--inference-path` gives it the OpenAI-style endpoint that
+  `internal/stt/openaicompat` speaks.
+- **The model is large-v3-turbo, quantized to q5_0** (574 MB). Its transcription of Italian
+  phone audio (300–3400 Hz, µ-law) synthesized by Kokoro was word for word right, including
+  names and a phone number.
+- **Its cost does not shrink with the utterance.** The encoder always processes a whole
+  window, so a 3 s phrase costs as much as a 10 s one. Measured in Docker on an M3 Pro, with
+  the full 30 s window: about 11.6 s per utterance with 4 threads, 8.3 s with 10. Too slow
+  for a conversation.
+- **So the window is reduced: `--audio-ctx 512`, about 10 s, with 8 threads.** That takes
+  2.5–2.7 s per utterance on the same Mac, still word for word right on the test phrases
+  (synthesized speech: real voices are checked at the phone test). Utterances must then fit
+  in the window: `PORTUNUS_STT_MAX_UTTERANCE` (9.5 s) cuts longer speech into pieces.
+  Change the two together, or the end of every long utterance is silently lost. The VM's
+  numbers will differ.
+- **It serves one request at a time.** Concurrent calls queue on it, and so do parallel
+  tests: `make integration` runs packages one at a time.
+- **It invents text for silence or noise** ("Sottotitoli a cura di…", "Grazie per la
+  visione"). The VAD is the first defence, because only speech reaches Whisper.
+  `--suppress-nst` drops non-speech tokens. A filter for known phrases comes only if calls
+  show the need.
+- **The language is fixed to Italian** (`--language it` on the server, `language=it` in each
+  request). Detection would cost time and can guess wrong on a short phrase.
+- **The preflight check transcribes one second of silence.** It proves the server and the
+  model work, and it warms the model up, so the first call does not pay for a cold start.
+
+## Silero VAD notes
+
+- **It runs in process through govad** (github.com/zserge/govad): pure Go, no cgo, Silero v5
+  weights embedded (about 1.2 MB of the binary), checked by its author against the ONNX
+  model. It costs about 0.6 ms per 32 ms frame on an M3 Pro, about 2% of one core per call.
+- **It accepts 16 kHz only**, so the 8 kHz call audio is upsampled first. One detector per
+  call, because it keeps LSTM state.
+- **The segmenter turns its probabilities into utterances** (`internal/call/segmenter.go`):
+  - speech starts at `PORTUNUS_VAD_THRESHOLD` and ends below the threshold minus 0.15;
+  - an utterance ends after `PORTUNUS_VAD_SILENCE` of silence;
+  - 300 ms of audio before the detected start are kept;
+  - bursts under 250 ms are dropped;
+  - a monologue is cut at `PORTUNUS_STT_MAX_UTTERANCE`, so each piece fits Whisper's window.
+
 ## Decisions taken
 
 - **TTS: Kokoro, with the female Italian voice `if_sara`, run locally** (see the Kokoro
@@ -335,14 +396,22 @@ fault before suspecting a provider.
 - **Local TTS API: the OpenAI-style `POST /v1/audio/speech`**, with `response_format: "pcm"`
   (24 kHz, 16-bit little-endian mono) and `stream: true`. Any compatible server works with
   `internal/tts/openaicompat`, so changing the engine is a configuration change.
+- **STT: Whisper large-v3-turbo, run locally on whisper.cpp** (see the Whisper notes). It
+  is free and MIT, and no caller's voice leaves the office. The cost is latency: Whisper
+  transcribes an utterance only once it is over, and on a CPU that takes seconds.
+- **Local STT API: the OpenAI-style `POST /v1/audio/transcriptions`**, a multipart upload of
+  one WAV utterance (16 kHz, 16-bit mono) with `language` and `response_format: "json"`.
+  Any compatible server works with `internal/stt/openaicompat`.
+- **VAD: Silero, in process through govad** (see the Silero VAD notes), rather than a
+  loudness threshold, which phone line noise and echo fool, or a separate service, which
+  would add a container and a network hop per frame.
 
 ## Open decisions: ask, do not choose
 
-- **The first STT provider.** Criteria: streaming, quality on Italian 8 kHz audio, latency,
-  EU data processing.
-- **The VAD implementation:** pure-Go energy-based, a model behind a local service, or the
-  STT provider's own endpointing.
-- **The HTTP API shape** of a local STT service, if the STT is local.
+- **Whisper's speed against its accuracy.** The reduced window (`--audio-ctx 512`) was
+  chosen for speed; whether it stays accurate on real callers' voices is checked at the
+  phone test. The model size and the threads are settled with measurements on the VM
+  before deployment.
 
 ## Not in v1
 

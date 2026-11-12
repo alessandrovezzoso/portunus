@@ -69,6 +69,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.GreetingFile != "prompts/greeting.txt" {
 		t.Errorf("GreetingFile = %q, want prompts/greeting.txt", cfg.GreetingFile)
 	}
+	if want := (STT{URL: "http://127.0.0.1:8890", Model: "large-v3-turbo", MaxUtterance: 9500 * time.Millisecond}); cfg.STT != want {
+		t.Errorf("STT = %+v, want %+v", cfg.STT, want)
+	}
+	if want := (VAD{Threshold: 0.5, Silence: 700 * time.Millisecond}); cfg.VAD != want {
+		t.Errorf("VAD = %+v, want %+v", cfg.VAD, want)
+	}
 }
 
 func TestLoadParsesValues(t *testing.T) {
@@ -83,8 +89,14 @@ func TestLoadParsesValues(t *testing.T) {
 	env[KeyMaxConcurrentCalls] = "5"
 	env[KeyRingDelay] = "1500ms"
 	env[KeyAllowPublicRegistrar] = "true"
+	env[KeyVADThreshold] = "0.65"
+	env[KeyVADSilence] = "900ms"
 
 	cfg := mustLoad(t, Inputs{DotEnv: env})
+
+	if cfg.VAD.Threshold != 0.65 || cfg.VAD.Silence != 900*time.Millisecond {
+		t.Errorf("VAD = %+v, want 0.65 and 900ms", cfg.VAD)
+	}
 
 	if cfg.LogLevel != slog.LevelDebug {
 		t.Errorf("LogLevel = %v, want debug", cfg.LogLevel)
@@ -195,6 +207,14 @@ func TestLoadValidation(t *testing.T) {
 		{"tts url without scheme", KeyTTSURL, "127.0.0.1:8880", "not an http(s) URL"},
 		{"tts url with another scheme", KeyTTSURL, "ws://127.0.0.1:8880", "not an http(s) URL"},
 		{"output buffer too small", KeyOutputBuffer, "500ms", "must be at least 1s"},
+		{"stt url without scheme", KeySTTURL, "127.0.0.1:8890", "not an http(s) URL"},
+		{"stt max utterance too short", KeySTTMaxUtterance, "1s", "outside 2s to 29s"},
+		{"stt max utterance too long", KeySTTMaxUtterance, "30s", "outside 2s to 29s"},
+		{"vad threshold not a number", KeyVADThreshold, "half", "not a number"},
+		{"vad threshold too low", KeyVADThreshold, "0.05", "outside 0.1 to 0.95"},
+		{"vad threshold too high", KeyVADThreshold, "1", "outside 0.1 to 0.95"},
+		{"vad silence too short", KeyVADSilence, "100ms", "outside 200ms to 3s"},
+		{"vad silence too long", KeyVADSilence, "5s", "outside 200ms to 3s"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

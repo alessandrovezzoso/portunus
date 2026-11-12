@@ -1,7 +1,8 @@
 # Local speech services that run next to the Portunus binary.
 #
-#   make tts-up     start them (docker compose -f deploy/compose.yaml up -d)
-#   make tts-down   stop them
+#   make tts-up     start Kokoro (speech synthesis)
+#   make stt-up     build and start Whisper (speech recognition)
+#   make tts-down   stop Kokoro; make stt-down stops Whisper
 #
 # They listen on 127.0.0.1 only: Portunus is the only client, and nothing in
 # this file should be reachable from the LAN, let alone the internet.
@@ -16,4 +17,41 @@ services:
     image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.10.0
     ports:
       - "127.0.0.1:8880:8880"
+    restart: unless-stopped
+
+  # Whisper large-v3-turbo behind whisper.cpp's server (MIT), built locally
+  # from deploy/whisper/Dockerfile, where the versions are pinned.
+  # --inference-path gives it the OpenAI-style POST /v1/audio/transcriptions
+  # endpoint that internal/stt/openaicompat speaks.
+  whisper:
+    build: ./whisper
+    image: portunus-whisper:local
+    ports:
+      - "127.0.0.1:8890:8080"
+    command:
+      - --host
+      - "0.0.0.0" # inside the container; the port is published on 127.0.0.1 only
+      - --port
+      - "8080"
+      - --inference-path
+      - /v1/audio/transcriptions
+      # Callers speak Italian. Fixing the language skips detection, which
+      # costs time and can guess wrong on a short phrase.
+      - --language
+      - it
+      - --no-timestamps
+      # Drops tokens such as music notes, which Whisper tends to invent on
+      # noise.
+      - --suppress-nst
+      # Whisper's encoder always processes a whole window, however short the
+      # phrase, so the window size sets the latency. 512 is about 10 s instead
+      # of the full 30 s, and on a CPU about three times faster. Utterances
+      # must then fit in it: PORTUNUS_STT_MAX_UTTERANCE (9.5 s) cuts longer
+      # speech into pieces. Change the two together.
+      - --audio-ctx
+      - "512"
+      # CPU threads. 8 suits the 11 cores Docker has on the development Mac;
+      # tune it to the VM at deployment.
+      - --threads
+      - "8"
     restart: unless-stopped

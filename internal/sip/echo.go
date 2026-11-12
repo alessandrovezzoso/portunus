@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-
-	"github.com/emiago/diago/media"
 )
 
 // Echo is the handler for the echo mode: it sends every inbound RTP payload
@@ -21,9 +19,7 @@ import (
 // No pacing is needed here: inbound packets arrive on the caller's 20 ms
 // clock, and diago's writer paces outbound packets on its own.
 func Echo(ctx context.Context, c *Call) error {
-	// diago's reader wants a buffer of at least one full RTP packet;
-	// anything smaller makes it allocate and copy on every Read.
-	buf := make([]byte, media.RTPBufSize)
+	buf := make([]byte, InboundBufSize)
 	for ctx.Err() == nil {
 		n, err := c.Inbound.Read(buf)
 		if err != nil {
