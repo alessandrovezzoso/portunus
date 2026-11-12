@@ -50,11 +50,19 @@ runs sit in one place.
 |---|---|---|---|
 | Kokoro-FastAPI (github.com/remsky/Kokoro-FastAPI) | v0.10.0 (image `ghcr.io/remsky/kokoro-fastapi-cpu`) | Apache-2.0 | HTTP server for the TTS |
 | Kokoro-82M model weights (huggingface.co/hexgrad/Kokoro-82M) | as bundled by the image | Apache-2.0 | the TTS model and its Italian voice `if_sara` |
+| eSpeak NG (github.com/espeak-ng/espeak-ng) | 1.52.0, inside the image | GPL-3.0-or-later | turns Italian text into phonemes for Kokoro |
+| phonemizer-fork (Python package) | 3.3.2, inside the image | GPL-3.0-or-later | Kokoro's bridge to eSpeak NG |
 
 ## Notes
 
 - **diago (MPL-2.0).** The MPL applies per file, so no diago source may be
   copied into this repository's files. Portunus only imports it as a module.
+- **eSpeak NG (GPL-3.0).** Kokoro relies on it entirely for Italian
+  pronunciation: word stress, letter groups and the reading of digits all come
+  from its rules. It runs inside the Kokoro container, and Portunus only sends
+  it text over HTTP, so the GPL does not reach this repository. It must never be
+  linked into `bin/portunus` (through cgo, for example), because the binary
+  would then have to be GPL.
 - **Opus.** diago's cgo Opus binding (`gopkg.in/hraban/opus.v2`, MIT) appears in
   `go.sum`, but it sits behind the `with_opus_c` build tag. It is not compiled
   or linked, which keeps the binary pure Go.
