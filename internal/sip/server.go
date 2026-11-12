@@ -49,8 +49,19 @@ type Options struct {
 	MaxConcurrentCalls int
 	RingDelay          time.Duration
 
+	// Ready, when set, is asked on every INVITE whether Portunus can serve a
+	// call right now: its speech services answer, its model account works.
+	// An error refuses the call with 486, so the PBX forwards it to voicemail
+	// instead of connecting the caller to an assistant that cannot hear or
+	// speak. It must return quickly; it is given readyTimeout.
+	Ready func(ctx context.Context) error
+
 	Logger *slog.Logger
 }
+
+// readyTimeout bounds Options.Ready: the caller is waiting for the phone to
+// ring.
+const readyTimeout = time.Second
 
 // shutdownTimeout bounds how long Run waits for active calls to hang up.
 const shutdownTimeout = 5 * time.Second

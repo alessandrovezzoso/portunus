@@ -47,10 +47,11 @@ type Options struct {
 
 // Client transcribes utterances through one server.
 type Client struct {
-	url      string
-	model    string
-	language string
-	http     *http.Client
+	url       string
+	healthURL string
+	model     string
+	language  string
+	http      *http.Client
 }
 
 // New returns a client for opts. It does not contact the server.
@@ -75,10 +76,11 @@ func New(opts Options) (*Client, error) {
 		}
 	}
 	return &Client{
-		url:      base.String() + "/v1/audio/transcriptions",
-		model:    opts.Model,
-		language: opts.Language,
-		http:     hc,
+		url:       base.String() + "/v1/audio/transcriptions",
+		healthURL: base.String() + "/health",
+		model:     opts.Model,
+		language:  opts.Language,
+		http:      hc,
 	}, nil
 }
 
@@ -140,6 +142,25 @@ func (c *Client) Transcribe(ctx context.Context, pcm []int16) (string, error) {
 		return "", fmt.Errorf("stt: server error: %s", t.Error)
 	}
 	return strings.TrimSpace(t.Text), nil
+}
+
+// Ping asks the server's /health endpoint whether it is up, without
+// transcribing anything. It is cheap enough to run before answering each
+// call, which Check, a real transcription, is not.
+func (c *Client) Ping(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.healthURL, nil)
+	if err != nil {
+		return err
+	}
+	res, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("stt: %w", err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("stt: health check: %s", res.Status)
+	}
+	return nil
 }
 
 // Check transcribes one second of silence. That proves in one request that the

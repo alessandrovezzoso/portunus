@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -88,7 +89,7 @@ func run() error {
 	// shutdown ever hangs, a second Ctrl+C still kills the process.
 	context.AfterFunc(ctx, stop)
 
-	handler, err := handlerFor(ctx, cfg, log)
+	handler, ready, err := handlerFor(ctx, cfg, log)
 	if err != nil {
 		return err
 	}
@@ -111,6 +112,7 @@ func run() error {
 		RTPPortMax:         cfg.RTPPortMax,
 		MaxConcurrentCalls: cfg.MaxConcurrentCalls,
 		RingDelay:          cfg.RingDelay,
+		Ready:              ready,
 		Logger:             log,
 	})
 	if err != nil {
@@ -125,15 +127,22 @@ func run() error {
 // handlerFor picks what Portunus does with an answered call, and builds the
 // adapters that mode needs. This is the one place that knows both the config
 // and the concrete adapters.
-func handlerFor(ctx context.Context, cfg *config.Config, log *slog.Logger) (sip.Handler, error) {
+//
+// It also returns the check run before answering each call, or nil. Only the
+// agent mode has one: the diagnostic modes answer whatever happens, because
+// seeing the failure is their point.
+func handlerFor(ctx context.Context, cfg *config.Config, log *slog.Logger) (sip.Handler, func(context.Context) error, error) {
 	switch cfg.Mode {
 	case config.ModeEcho:
-		return sip.Echo, nil
+		return sip.Echo, nil, nil
+
+	case config.ModeAgent:
+		return agentHandler(ctx, cfg, log)
 
 	case config.ModeGreet:
 		greeting, err := readGreeting(cfg.GreetingFile)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		log.Info("greeting loaded", "file", cfg.GreetingFile, "characters", len([]rune(greeting)))
 
@@ -143,7 +152,7 @@ func handlerFor(ctx context.Context, cfg *config.Config, log *slog.Logger) (sip.
 			Voice:   cfg.TTS.Voice,
 		})
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		preflightService(ctx, speechService{
 			name: "TTS", url: cfg.TTS.URL, check: tts.Check, timeout: ttsCheckTimeout,
@@ -153,7 +162,7 @@ func handlerFor(ctx context.Context, cfg *config.Config, log *slog.Logger) (sip.
 		return call.Greet(tts, greeting, call.GreetOptions{
 			OutputBuffer: cfg.OutputBuffer,
 			Logger:       log,
-		}), nil
+		}), nil, nil
 
 	case config.ModeListen:
 		stt, err := sttapi.New(sttapi.Options{
@@ -162,7 +171,7 @@ func handlerFor(ctx context.Context, cfg *config.Config, log *slog.Logger) (sip.
 			Language: callerLanguage,
 		})
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		preflightService(ctx, speechService{
 			name: "STT", url: cfg.STT.URL, check: stt.Check, timeout: sttCheckTimeout,
@@ -172,34 +181,52 @@ func handlerFor(ctx context.Context, cfg *config.Config, log *slog.Logger) (sip.
 		// The VAD runs in this process with embedded weights, so failing to
 		// load it means a broken binary: that is fatal, unlike a server that
 		// may still be starting.
-		if _, err := silero.New(); err != nil {
-			return nil, err
+		vad, err := newVAD()
+		if err != nil {
+			return nil, nil, err
 		}
-		newVAD := func() (call.VAD, error) { return silero.New() }
 
-		return call.Listen(stt, newVAD, call.ListenOptions{
+		return call.Listen(stt, vad, call.ListenOptions{
 			VADThreshold: float32(cfg.VAD.Threshold),
 			VADSilence:   cfg.VAD.Silence,
 			MaxUtterance: cfg.STT.MaxUtterance,
 			Logger:       log,
-		}), nil
+		}), nil, nil
 	}
-	return nil, fmt.Errorf("mode %q is not implemented yet: this milestone has echo, greet and listen", cfg.Mode)
+	return nil, nil, fmt.Errorf("mode %q is not known", cfg.Mode)
 }
 
-// readGreeting reads the greet-mode text. A missing or empty file is fatal:
-// a greeting that says nothing proves nothing.
+// newVAD checks that the VAD loads, and returns the function that makes one
+// per call. It runs in this process with embedded weights, so failing to load
+// it means a broken binary: that is fatal, unlike a server that may still be
+// starting.
+func newVAD() (func() (call.VAD, error), error) {
+	if _, err := silero.New(); err != nil {
+		return nil, err
+	}
+	return func() (call.VAD, error) { return silero.New() }, nil
+}
+
+// readGreeting reads the greet-mode text.
 func readGreeting(path string) (string, error) {
+	return readText(config.KeyGreetingFile, path)
+}
+
+// readText reads one of the texts in prompts/. A missing or empty file is
+// fatal: a greeting or a prompt that says nothing proves nothing. The error
+// points at the example file to start from.
+func readText(key, path string) (string, error) {
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return "", fmt.Errorf("%s: %s does not exist (copy prompts/example.greeting.txt to start)", config.KeyGreetingFile, path)
+		example := filepath.Join(filepath.Dir(path), "example."+filepath.Base(path))
+		return "", fmt.Errorf("%s: %s does not exist (copy %s to start)", key, path, example)
 	}
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", config.KeyGreetingFile, err)
+		return "", fmt.Errorf("%s: %w", key, err)
 	}
 	text := strings.TrimSpace(string(raw))
 	if text == "" {
-		return "", fmt.Errorf("%s: %s is empty", config.KeyGreetingFile, path)
+		return "", fmt.Errorf("%s: %s is empty", key, path)
 	}
 	return text, nil
 }

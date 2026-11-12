@@ -85,6 +85,12 @@ func (s *Server) handleInvite(ctx context.Context, d *diago.DialogServerSession,
 	}
 	defer s.release()
 
+	if err := s.ready(ctx); err != nil {
+		log.Warn("call refused: not ready", "caller", MaskNumber(caller), "reason", err)
+		refuse(d, log)
+		return
+	}
+
 	log.Info("incoming call", "caller", MaskNumber(caller))
 	log.Debug("incoming call, full caller number", "caller", caller)
 
@@ -181,6 +187,16 @@ func (s *Server) handleInvite(ctx context.Context, d *diago.DialogServerSession,
 		return
 	}
 	log.Info("call ended", attrs...)
+}
+
+// ready runs Options.Ready, if set, within readyTimeout.
+func (s *Server) ready(ctx context.Context) error {
+	if s.opts.Ready == nil {
+		return nil
+	}
+	rctx, cancel := context.WithTimeout(ctx, readyTimeout)
+	defer cancel()
+	return s.opts.Ready(rctx)
 }
 
 // refuse turns a call away with 486 Busy Here.

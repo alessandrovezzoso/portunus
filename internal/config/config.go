@@ -53,6 +53,20 @@ const (
 	KeySTTMaxUtterance = "PORTUNUS_STT_MAX_UTTERANCE"
 	KeyVADThreshold    = "PORTUNUS_VAD_THRESHOLD"
 	KeyVADSilence      = "PORTUNUS_VAD_SILENCE"
+
+	// KeyAnthropicAPIKey keeps the name the official SDK expects, without
+	// the PORTUNUS_ prefix.
+	KeyAnthropicAPIKey = "ANTHROPIC_API_KEY"
+	KeyLLMModel        = "PORTUNUS_LLM_MODEL"
+	KeyLLMMaxTokens    = "PORTUNUS_LLM_MAX_TOKENS"
+	KeyLLMThinking     = "PORTUNUS_LLM_THINKING"
+
+	KeyMaxCallTime = "PORTUNUS_MAX_CALL_TIME"
+	KeyMaxTurns    = "PORTUNUS_MAX_TURNS"
+
+	KeySystemPromptFile  = "PORTUNUS_SYSTEM_PROMPT_FILE"
+	KeyAgentGreetingFile = "PORTUNUS_AGENT_GREETING_FILE"
+	KeyHoldingFile       = "PORTUNUS_HOLDING_FILE"
 )
 
 // knownKeys lists every PORTUNUS_ variable this version understands. Anything
@@ -66,7 +80,12 @@ var knownKeys = []string{
 	KeyMaxConcurrentCalls, KeyRingDelay, KeyAllowPublicRegistrar,
 	KeyTTSURL, KeyTTSModel, KeyTTSVoice, KeyOutputBuffer, KeyGreetingFile,
 	KeySTTURL, KeySTTModel, KeySTTMaxUtterance, KeyVADThreshold, KeyVADSilence,
+	KeyLLMModel, KeyLLMMaxTokens, KeyLLMThinking, KeyMaxCallTime, KeyMaxTurns,
+	KeySystemPromptFile, KeyAgentGreetingFile, KeyHoldingFile,
 }
+
+// secretKeys appear in Summary only as their Fingerprint.
+var secretKeys = map[string]bool{KeySIPPassword: true, KeyAnthropicAPIKey: true}
 
 const keyPrefix = "PORTUNUS_"
 
@@ -129,6 +148,18 @@ type Config struct {
 
 	STT STT
 	VAD VAD
+	LLM LLM
+
+	// MaxCallTime and MaxTurns are the per-call cost ceilings of the agent
+	// mode. Either one ends the call gracefully.
+	MaxCallTime time.Duration
+	MaxTurns    int
+
+	// The texts of the agent mode. They live in prompts/, which git ignores,
+	// because the real ones name the office.
+	SystemPromptFile  string
+	AgentGreetingFile string
+	HoldingFile       string
 
 	values  map[string]string // effective value of each setting, for Summary
 	sources map[string]Source
@@ -169,6 +200,19 @@ type STT struct {
 	// 10 s with the --audio-ctx 512 that deploy/compose.yaml sets, 30 s with
 	// Whisper's full window.
 	MaxUtterance time.Duration
+}
+
+// LLM configures the conversation model, Claude.
+type LLM struct {
+	APIKey string
+	// Model is set here and nowhere else. A fast Haiku-class model is the
+	// default: on the phone, latency beats eloquence.
+	Model string
+	// MaxTokens caps each reply, thinking included: a cost ceiling.
+	MaxTokens int64
+	// Thinking lets the model reason before answering, at the cost of
+	// silence before its first word.
+	Thinking bool
 }
 
 // VAD tunes the detection of the caller's speech.
@@ -218,6 +262,17 @@ func Load(in Inputs) (*Config, []string, error) {
 			Threshold: l.float(KeyVADThreshold, 0.5),
 			Silence:   l.duration(KeyVADSilence, 700*time.Millisecond),
 		},
+		LLM: LLM{
+			APIKey:    l.string(KeyAnthropicAPIKey, ""),
+			Model:     l.string(KeyLLMModel, "claude-haiku-5-5"),
+			MaxTokens: int64(l.int(KeyLLMMaxTokens, 1024)),
+			Thinking:  l.bool(KeyLLMThinking, false),
+		},
+		MaxCallTime:       l.duration(KeyMaxCallTime, 5*time.Minute),
+		MaxTurns:          l.int(KeyMaxTurns, 20),
+		SystemPromptFile:  l.string(KeySystemPromptFile, "prompts/system.txt"),
+		AgentGreetingFile: l.string(KeyAgentGreetingFile, "prompts/agent-greeting.txt"),
+		HoldingFile:       l.string(KeyHoldingFile, "prompts/holding.txt"),
 	}
 	cfg.SIP.AuthUser = l.string(KeySIPAuthUser, cfg.SIP.Extension)
 	cfg.LogLevel = l.logLevel(KeyLogLevel, slog.LevelInfo)
@@ -287,6 +342,21 @@ func (c *Config) validate() []error {
 		add("%s: %v is outside 2s to 29s", KeySTTMaxUtterance, c.STT.MaxUtterance)
 	}
 
+	if c.Mode == ModeAgent && c.LLM.APIKey == "" {
+		add("%s is required in agent mode (create a key in the Anthropic Console)", KeyAnthropicAPIKey)
+	}
+	// Under 256 tokens a reply with a little thinking can be cut off; over
+	// 8192 the ceiling no longer bounds anything a phone reply needs.
+	if c.LLM.MaxTokens < 256 || c.LLM.MaxTokens > 8192 {
+		add("%s: %d is outside 256 to 8192", KeyLLMMaxTokens, c.LLM.MaxTokens)
+	}
+	if c.MaxCallTime < 30*time.Second || c.MaxCallTime > time.Hour {
+		add("%s: %v is outside 30s to 1h", KeyMaxCallTime, c.MaxCallTime)
+	}
+	if c.MaxTurns < 1 || c.MaxTurns > 100 {
+		add("%s: %d is outside 1 to 100", KeyMaxTurns, c.MaxTurns)
+	}
+
 	// Outside this range the VAD either hears speech in line noise or misses
 	// quiet callers altogether.
 	if c.VAD.Threshold < 0.1 || c.VAD.Threshold > 0.95 {
@@ -309,7 +379,7 @@ func (c *Config) Summary() []slog.Attr {
 	attrs := make([]slog.Attr, 0, len(c.values))
 	for _, key := range sortedKeys(c.values) {
 		value := c.values[key]
-		if key == KeySIPPassword {
+		if secretKeys[key] {
 			value = Fingerprint(value)
 		}
 		attrs = append(attrs, slog.String(key, fmt.Sprintf("%s [%s]", value, c.sources[key])))

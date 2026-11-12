@@ -60,18 +60,7 @@ func Listen(stt STT, newVAD func() (VAD, error), opts ListenOptions) sip.Handler
 	if log == nil {
 		log = slog.Default()
 	}
-	threshold := opts.VADThreshold
-	if threshold <= 0 {
-		threshold = defaultThreshold
-	}
-	silence := opts.VADSilence
-	if silence <= 0 {
-		silence = defaultSilence
-	}
-	maxUtterance := opts.MaxUtterance
-	if maxUtterance <= 0 {
-		maxUtterance = defaultMaxUtterance
-	}
+	segCfg := segmenterConfigFor(opts.VADThreshold, opts.VADSilence, opts.MaxUtterance)
 	drain := opts.drain
 	if drain <= 0 {
 		drain = drainTimeout
@@ -99,31 +88,24 @@ func Listen(stt STT, newVAD func() (VAD, error), opts ListenOptions) sip.Handler
 		// the transcripts, never the reading of inbound audio. Its context is
 		// detached from the call's, which ends at the hangup: what was already
 		// captured still gets transcribed, within drain.
-		queue := make(chan queued, queuedUtterances)
+		e := newEar(vad, law, segCfg, nil, log)
 		t := &transcriber{stt: stt, vadRate: vad.SampleRate(), log: log}
 		sttCtx, stopSTT := context.WithCancel(context.WithoutCancel(ctx))
 		defer stopSTT()
 		transcribed := make(chan struct{})
 		go func() {
-			t.run(sttCtx, queue)
+			t.run(sttCtx, e.queue)
 			close(transcribed)
 		}()
 
-		seg := newSegmenter(segmenterConfig{
-			rate:         vad.SampleRate(),
-			threshold:    threshold,
-			silence:      silence,
-			minSpeech:    defaultMinSpeech,
-			preRoll:      defaultPreRoll,
-			maxUtterance: maxUtterance,
-		})
-		dropped, readErr := listenLoop(ctx, c.Inbound, media.NewDecoder(law, vad.SampleRate()), vad, seg, queue, log)
+		// The ear closes its queue when the call's audio ends, which lets the
+		// transcriber finish.
+		readErr := e.run(ctx, c.Inbound)
 
 		// The call is over: stop the silence, then let the transcriber finish
 		// the queue, for drain at most.
 		cancel()
 		runErr := <-paced
-		close(queue)
 		select {
 		case <-transcribed:
 		case <-time.After(drain):
@@ -131,7 +113,7 @@ func Listen(stt STT, newVAD func() (VAD, error), opts ListenOptions) sip.Handler
 			<-transcribed
 		}
 
-		t.logSummary(dropped)
+		t.logSummary(int(e.dropped.Load()))
 		if readErr != nil {
 			return readErr
 		}
@@ -141,55 +123,6 @@ func Listen(stt STT, newVAD func() (VAD, error), opts ListenOptions) sip.Handler
 			return fmt.Errorf("send silence: %w", runErr)
 		}
 		return nil
-	}
-}
-
-// queued is an utterance on its way to the STT, stamped with the moment the
-// VAD ended it, which is where stt_ms starts.
-type queued struct {
-	utterance
-	ended time.Time
-	turn  int
-}
-
-// listenLoop reads inbound audio until the call ends, cuts it into VAD frames
-// and hands finished utterances to the queue. It returns how many utterances
-// it had to drop, and an error only for a failure that is not the call ending.
-func listenLoop(ctx context.Context, in io.Reader, dec *media.Decoder, vad VAD, seg *segmenter, queue chan<- queued, log *slog.Logger) (dropped int, err error) {
-	buf := make([]byte, sip.InboundBufSize)
-	frameSize := vad.FrameSize()
-	var pending []int16 // decoded audio not yet a full VAD frame
-	turn := 0
-
-	for {
-		n, err := in.Read(buf)
-		if err != nil {
-			if inboundEnded(ctx, err) {
-				return dropped, nil
-			}
-			return dropped, fmt.Errorf("read inbound audio: %w", err)
-		}
-		if n == 0 {
-			continue // diago reports keepalives and empty payloads as zero-length reads
-		}
-
-		// RTP frames (20 ms) and VAD frames (32 ms for Silero) do not line
-		// up, so decoded audio collects in pending until a VAD frame is full.
-		pending = append(pending, dec.Decode(buf[:n])...)
-		for len(pending) >= frameSize {
-			frame := pending[:frameSize]
-			if u := seg.push(frame, vad.Process(frame)); u != nil {
-				turn++
-				select {
-				case queue <- queued{utterance: *u, ended: time.Now(), turn: turn}:
-				default:
-					dropped++
-					log.Warn("utterance dropped: the STT is too far behind",
-						"turn", turn, "speech_ms", u.speech.Milliseconds(), "queued", queuedUtterances)
-				}
-			}
-			pending = pending[:copy(pending, pending[frameSize:])]
-		}
 	}
 }
 
@@ -288,4 +221,24 @@ func inboundEnded(ctx context.Context, err error) bool {
 // mediaClosed reports whether err is the media being closed by a hangup.
 func mediaClosed(err error) bool {
 	return errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed)
+}
+
+// segmenterConfigFor fills in the defaults for the settings a mode exposes.
+func segmenterConfigFor(threshold float32, silence, maxUtterance time.Duration) segmenterConfig {
+	if threshold <= 0 {
+		threshold = defaultThreshold
+	}
+	if silence <= 0 {
+		silence = defaultSilence
+	}
+	if maxUtterance <= 0 {
+		maxUtterance = defaultMaxUtterance
+	}
+	return segmenterConfig{
+		threshold:    threshold,
+		silence:      silence,
+		minSpeech:    defaultMinSpeech,
+		preRoll:      defaultPreRoll,
+		maxUtterance: maxUtterance,
+	}
 }

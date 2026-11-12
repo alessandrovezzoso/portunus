@@ -30,6 +30,7 @@ make integration        # tests against real services; needs make tts-up and mak
 make echo               # run in echo mode (milestone 0)
 make greet              # run in greet mode (milestone 1); needs make tts-up
 make listen             # run in listen mode (milestone 2); needs make stt-up
+make agent              # run in agent mode (milestone 3); needs both services and the API key
 make run                # run with the mode set in .env
 make tts-up             # start Kokoro (deploy/compose.yaml)
 make tts-down           # stop it
@@ -93,7 +94,10 @@ Each call runs three goroutines, all cancelled by a shared context:
    writer, whose every `Write` blocks until its next tick. The pacer feeds it one frame per
    `Write`, and silence when its queue is empty.
 3. **orchestrator** (`internal/call`): the turn state machine (listening → thinking →
-   speaking), barge-in, silence timeout, maximum call time and maximum turns.
+   speaking), barge-in, silence timeout, maximum call time and maximum turns. In agent
+   mode the ear (`ear.go`) reads inbound audio in its own goroutine, and the mouth
+   (`mouth.go`) synthesizes a reply's sentences in another while the model streams the
+   next ones.
 
 One turn: VAD end of speech → STT final transcript → Claude streaming reply → sentence
 splitter → speech sanitizer → TTS stream → resample → G.711 encode → pacer buffer.
@@ -125,6 +129,15 @@ remembered across calls.
 - **Speak at the first sentence.** Never wait for the full Claude reply or the full TTS
   output. The sentence splitter hands each finished sentence to TTS while Claude is still
   writing the next one.
+- **Until barge-in exists, the two sides take turns.** While the assistant is audible, and
+  for a 300 ms echo tail after, the ear is muted: speech heard then is counted
+  (`ignored_utterances`) and thrown away. That also keeps the handset's echo of the
+  assistant out of the conversation. Speech heard while the assistant is only thinking is
+  kept and answered next.
+- **The holding phrase covers the wait.** The moment the caller stops talking, a short
+  phrase synthesized at startup plays at once ("Certo, un momento."), in rotation from
+  `prompts/holding.txt`, while the STT and the model work. The prompt tells the model it
+  exists, so it does not open its reply with another one.
 - **Barge-in.** When VAD hears the caller start speaking while the assistant is audible:
   1. Flush the pacer buffer. This is what silences the assistant.
   2. Cancel the turn's context. This stops the Claude stream and TTS.
@@ -209,6 +222,15 @@ even when the audio was terrible. Every call ends with these log lines:
 - `call ended`, written by `internal/sip` in every mode: duration, frames in and out, and
   inbound RTP `lost_pct`, the loss on the wire before this process.
 
+In agent mode each answered turn logs `turn latency` (`stt_ms`, `llm_first_token_ms`,
+`tts_first_audio_ms`, `first_audio_ms`; the last runs from the VAD's end-of-speech decision
+to the first frame of the real reply on the wire, after the holding phrase). The call ends
+with `call audio quality` (plus `ignored_utterances` and `dropped_utterances`), `call
+latency` (averages and maxima), `call usage` (input, output, cache read and cache write
+tokens, so the cost of a call can be read from it) and `conversation ended` with its reason:
+`assistant`, `caller`, `max_turns`, `max_call_time`, `llm_unavailable`, `llm_error` or
+`tts_error`. Both sides of the conversation appear only at debug level (`turn text`).
+
 When recording is enabled, the WAV is tapped inside the process, before the wire. A clean
 WAV next to choppy audio at the handset moves the fault to RTP delivery or the phone.
 
@@ -222,6 +244,12 @@ WAV next to choppy audio at the handset moves the fault to RTP delivery or the p
   - A rejected key is fatal. Portunus does not register, so the S20 sends calls to its
     fallback instead of a dead line.
   - An unreachable API is only a warning.
+- **In agent mode, a call is answered only if it can be served.** On every INVITE,
+  `sip.Options.Ready` pings Kokoro and Whisper (300 ms at most) and checks that the model
+  account has not been marked down. Otherwise the call gets `486` and goes to voicemail.
+  Exhausted credit or a revoked key (402, 401, 403) marks the account down; a one-token
+  probe then runs at most once a minute, and the first success opens the door again. The
+  diagnostic modes have no such check: seeing the failure is their point.
 - **The registrar must resolve to a private address.** Use the S20's IP.
   `PORTUNUS_ALLOW_PUBLIC_REGISTRAR=true` is the explicit override.
 - **The User-Agent is fixed to `Portunus/<version>`**, so the S20's User Agent Registration
@@ -262,6 +290,33 @@ WAV next to choppy audio at the handset moves the fault to RTP delivery or the p
 - **phonellm is inspiration, not a source.** It has no licence, so its code must not be
   copied, adapted or translated here. Its design ideas are fine, but the implementation is
   ours.
+
+## Threat model: what a caller can try
+
+Callers are strangers, and some will try to misuse the assistant. v1 is built so that the
+worst they can do is waste a call.
+
+- **The system prompt must be treated as public.** A caller can ask the model to repeat
+  its instructions, and no prompt reliably prevents that. Nothing a caller must not hear
+  goes into `prompts/system.txt`: no internal numbers, names of clients, passwords or
+  procedures. Office information the assistant may give is listed there explicitly.
+- **The caller ID is a claim, not an identity.** The number in From can be spoofed, and
+  the model never sees it anyway. Nothing is ever unlocked by who the caller says they are.
+- **The model has one tool, `end_call`, and it only hangs up.** It cannot look anything
+  up, send anything, or reach the LAN. Every future capability (call transfer in v2 first)
+  takes its limits from config, never from the model: the model may ask to transfer, but
+  the list of extensions it may transfer to is not its decision.
+- **The message summary is caller-controlled text.** When notify arrives, the email must
+  mark the summary as unverified and render links as plain text: "the director says to
+  wire money to this account" is exactly what a fraudster would dictate.
+- **Prompt injection through speech** ("ignore your instructions…") can at worst make the
+  model say something off-script to the very person who asked for it. The prompt keeps it
+  on its task; the sanitizer and the lack of tools keep anything else from happening.
+- **Callers must know they are talking to a machine** (EU AI Act transparency): the
+  greeting says so before anything else, and it is fixed text, not generated.
+- **What callers say leaves the office for Claude** (Anthropic), as text. Audio stays
+  local (Whisper and Kokoro run on this host). The office's privacy notice must say so,
+  and so must any notice about transcripts or recordings once they are enabled.
 
 ## Milestone ladder
 
@@ -331,11 +386,14 @@ fault before suspecting a provider.
   pinned and the port bound to `127.0.0.1:8880`. Portunus calls it through
   `internal/tts/openaicompat`.
 - **Its text normalizer is turned off** (`normalization_options.normalize: false`), because
-  it is written for English. Normalizing Italian numbers, phone numbers and times is
-  Portunus's job, at the `agent` milestone. Left to espeak-ng, `02 4567 8901` is read as
-  large numbers ("quattromilacinquecento…"), not digit by digit.
+  it is written for English. Left to espeak-ng, `02 4567 8901` is read as large numbers
+  ("quattromilacinquecento…"), not digit by digit. `internal/speech` does Portunus's own
+  Italian normalization before every sentence: numbers in words, phone numbers digit by
+  digit in their groups, times, dates, amounts and e-mail addresses. Kokoro's inline pause
+  tags (`[pause:0.4s]`) are left untouched.
 - **It is weak on very short utterances** (fewer than 10–20 tokens), so the sentence splitter
-  should merge short sentences before sending them.
+  merges sentences shorter than 25 characters with the next one, and the holding phrases
+  are a little longer than two words.
 - **The voice prefix picks the language.** `if_sara` selects the Italian pipeline, so no
   `lang_code` is sent.
 - **Speed:** about 9× real time on an M3 Pro CPU, and slower on the first synthesis after
@@ -387,6 +445,37 @@ fault before suspecting a provider.
   - bursts under 250 ms are dropped;
   - a monologue is cut at `PORTUNUS_STT_MAX_UTTERANCE`, so each piece fits Whisper's window.
 
+## Claude notes
+
+- **Model: `claude-haiku-5-5`**, from `PORTUNUS_LLM_MODEL`, through Anthropic's official Go
+  SDK (`internal/llm/anthropic`). Effort is `low`, and thinking is off by default
+  (`PORTUNUS_LLM_THINKING`): on the phone every second of silence counts. Haiku 5.5 accepts
+  thinking off at effort `high` or below. With thinking off, the adapter appends Anthropic's
+  recommended line against tool calls written as text.
+- **No sampling parameters** (`temperature`, `top_p`): current models reject them.
+- **Prompt caching:** two breakpoints. One on the fixed system prompt; the call's own context
+  (date, time, the greeting already said) is a second system block after it. The other is
+  the top-level `cache_control`, which caches the conversation so far on every turn. Haiku
+  5.5 caches prefixes from 512 tokens, so a short prompt starts caching after a turn or two.
+  `call usage` shows the cache reads.
+- **The caller's number is never sent to Claude.** It is a third party's data, and the
+  assistant asks for a callback number anyway.
+- **The adapter keeps the history, thinking blocks included and unmodified**, as the API
+  requires. A failed reply leaves the history as it was.
+- **This SDK version sends the key as `Authorization: Bearer`**, not `x-api-key`. It also
+  honors `ANTHROPIC_BASE_URL` and `ANTHROPIC_CUSTOM_HEADERS` from the environment: leave
+  them unset on the VM.
+- **Errors:** 401 and 403 are fatal at startup and mark the account down during calls; 402
+  (`billing_error`) marks it down; a 400 mentioning "credit balance" is treated the same,
+  as a best effort, because the SDK warns that error wording can change. `Models.Get`
+  (the startup check) costs nothing and works with no credit, which is why the recovery
+  probe is a real one-token request.
+- **Refusals** (`stop_reason: refusal`) get a fixed neutral line, and the call goes on.
+  Haiku 5.5 has no server-side fallback model.
+- **The greeting is fixed text in `prompts/agent-greeting.txt`, not generated:** it plays at
+  once and always carries the AI Act notice. It is about 14 s long; a shorter one gives
+  the caller the floor sooner.
+
 ## Decisions taken
 
 - **TTS: Kokoro, with the female Italian voice `if_sara`, run locally** (see the Kokoro
@@ -402,11 +491,21 @@ fault before suspecting a provider.
 - **Local STT API: the OpenAI-style `POST /v1/audio/transcriptions`**, a multipart upload of
   one WAV utterance (16 kHz, 16-bit mono) with `language` and `response_format: "json"`.
   Any compatible server works with `internal/stt/openaicompat`.
+- **LLM: Claude Haiku 5.5 through Anthropic's official Go SDK** (Apache-2.0). See the Claude
+  notes. The model holds the conversation and takes the message; it has one tool,
+  `end_call`.
+- **The agent mode takes turns until barge-in exists**, and fills the wait after each phrase
+  with a pre-synthesized holding phrase (the user's choice, after the first latency
+  numbers: about 3 s of listening and transcription before the model even starts).
 - **VAD: Silero, in process through govad** (see the Silero VAD notes), rather than a
   loudness threshold, which phone line noise and echo fool, or a separate service, which
   would add a container and a network hop per frame.
 
 ## Open decisions: ask, do not choose
+
+- **Thinking on or off.** `TestFirstTokenLatency` (integration, needs the API key) measures
+  the delay before the first word both ways. Off is the default until the numbers say
+  otherwise.
 
 - **Whisper's speed against its accuracy.** The reduced window (`--audio-ctx 512`) was
   chosen for speed; whether it stays accurate on real callers' voices is checked at the

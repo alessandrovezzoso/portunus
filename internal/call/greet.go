@@ -62,7 +62,7 @@ func Greet(tts TTS, text string, opts GreetOptions) sip.Handler {
 			cancel()
 		}()
 
-		ttsFirst, err := speak(ctx, tts, text, law, pacer)
+		ttsFirst, _, err := speak(ctx, tts, text, law, pacer)
 		if err == nil {
 			waitDrained(ctx, pacer)
 			sleepCtx(ctx, tail)
@@ -85,13 +85,15 @@ func Greet(tts TTS, text string, opts GreetOptions) sip.Handler {
 	}
 }
 
-// speak streams one utterance from the TTS into the pacer and returns how
-// long the first audio took to arrive.
-func speak(ctx context.Context, tts TTS, text string, law media.Law, p *media.Pacer) (time.Duration, error) {
+// speak streams one utterance from the TTS into the pacer. It returns how
+// long the first audio took to arrive from the TTS, and when that audio will
+// reach the wire: later than its arrival when other audio, such as the
+// holding phrase, is still queued ahead of it.
+func speak(ctx context.Context, tts TTS, text string, law media.Law, p *media.Pacer) (first time.Duration, onWire time.Time, err error) {
 	start := time.Now()
 	body, err := tts.Synthesize(ctx, text)
 	if err != nil {
-		return 0, err
+		return 0, time.Time{}, err
 	}
 	defer func() { _ = body.Close() }()
 
@@ -101,13 +103,14 @@ func speak(ctx context.Context, tts TTS, text string, law media.Law, p *media.Pa
 
 	// The utterance starts with its first audio, not with the request: the
 	// silence before it is TTS latency, measured separately, not starvation.
-	var first time.Duration
 	defer p.SetSpeaking(false)
 	for {
 		n, err := pcm.Read(buf)
 		if n > 0 {
 			if first == 0 {
 				first = time.Since(start)
+				ahead := time.Duration(p.Len()) * time.Second / media.BytesPerSecond
+				onWire = time.Now().Add(ahead)
 				p.SetSpeaking(true)
 			}
 			_, _ = p.Write(enc.Encode(buf[:n]))
@@ -116,11 +119,11 @@ func speak(ctx context.Context, tts TTS, text string, law media.Law, p *media.Pa
 			break
 		}
 		if err != nil {
-			return first, err
+			return first, onWire, err
 		}
 	}
 	_, _ = p.Write(enc.Flush())
-	return first, nil
+	return first, onWire, nil
 }
 
 // waitDrained returns once the pacer has sent everything queued, or ctx ends.

@@ -9,12 +9,14 @@ import (
 	"time"
 )
 
-// minimal holds the settings Load requires. Tests copy it and change one thing.
+// minimal holds the settings Load requires in every mode, agent included.
+// Tests copy it and change one thing.
 func minimal() map[string]string {
 	return map[string]string{
-		KeySIPRegistrar: "192.0.2.10",
-		KeySIPExtension: "200",
-		KeySIPPassword:  "s3cret",
+		KeySIPRegistrar:    "192.0.2.10",
+		KeySIPExtension:    "200",
+		KeySIPPassword:     "s3cret",
+		KeyAnthropicAPIKey: "sk-test-key",
 	}
 }
 
@@ -74,6 +76,15 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if want := (VAD{Threshold: 0.5, Silence: 700 * time.Millisecond}); cfg.VAD != want {
 		t.Errorf("VAD = %+v, want %+v", cfg.VAD, want)
+	}
+	if want := (LLM{APIKey: "sk-test-key", Model: "claude-haiku-5-5", MaxTokens: 1024}); cfg.LLM != want {
+		t.Errorf("LLM = %+v, want %+v", cfg.LLM, want)
+	}
+	if cfg.MaxCallTime != 5*time.Minute || cfg.MaxTurns != 20 {
+		t.Errorf("ceilings = %v and %d turns, want 5m and 20", cfg.MaxCallTime, cfg.MaxTurns)
+	}
+	if cfg.SystemPromptFile != "prompts/system.txt" || cfg.AgentGreetingFile != "prompts/agent-greeting.txt" || cfg.HoldingFile != "prompts/holding.txt" {
+		t.Errorf("agent files = %q, %q, %q", cfg.SystemPromptFile, cfg.AgentGreetingFile, cfg.HoldingFile)
 	}
 }
 
@@ -210,6 +221,10 @@ func TestLoadValidation(t *testing.T) {
 		{"stt url without scheme", KeySTTURL, "127.0.0.1:8890", "not an http(s) URL"},
 		{"stt max utterance too short", KeySTTMaxUtterance, "1s", "outside 2s to 29s"},
 		{"stt max utterance too long", KeySTTMaxUtterance, "30s", "outside 2s to 29s"},
+		{"llm max tokens too few", KeyLLMMaxTokens, "100", "outside 256 to 8192"},
+		{"max call time too short", KeyMaxCallTime, "10s", "outside 30s to 1h"},
+		{"max turns zero", KeyMaxTurns, "0", "outside 1 to 100"},
+		{"thinking not a boolean", KeyLLMThinking, "maybe", "not a boolean"},
 		{"vad threshold not a number", KeyVADThreshold, "half", "not a number"},
 		{"vad threshold too low", KeyVADThreshold, "0.05", "outside 0.1 to 0.95"},
 		{"vad threshold too high", KeyVADThreshold, "1", "outside 0.1 to 0.95"},
@@ -282,14 +297,18 @@ func TestSummaryHidesThePassword(t *testing.T) {
 
 	var password, registrar string
 	for _, a := range cfg.Summary() {
-		if strings.Contains(a.Value.String(), "s3cret") {
-			t.Errorf("summary attribute %s leaks the password: %q", a.Key, a.Value)
+		if strings.Contains(a.Value.String(), "s3cret") || strings.Contains(a.Value.String(), "sk-test-key") {
+			t.Errorf("summary attribute %s leaks a secret: %q", a.Key, a.Value)
 		}
 		switch a.Key {
 		case KeySIPPassword:
 			password = a.Value.String()
 		case KeySIPRegistrar:
 			registrar = a.Value.String()
+		case KeyAnthropicAPIKey:
+			if want := Fingerprint("sk-test-key") + " [.env]"; a.Value.String() != want {
+				t.Errorf("API key summary = %q, want %q", a.Value, want)
+			}
 		}
 	}
 	if want := Fingerprint("s3cret") + " [.env]"; password != want {
@@ -316,4 +335,17 @@ func TestFingerprint(t *testing.T) {
 func with(m map[string]string, key, value string) map[string]string {
 	m[key] = value
 	return m
+}
+
+func TestAgentModeNeedsTheAPIKey(t *testing.T) {
+	env := with(minimal(), KeyMode, "agent")
+	delete(env, KeyAnthropicAPIKey)
+	if _, _, err := Load(Inputs{DotEnv: env}); err == nil || !strings.Contains(err.Error(), KeyAnthropicAPIKey) {
+		t.Errorf("agent mode without a key: error = %v, want one naming %s", err, KeyAnthropicAPIKey)
+	}
+	// The other modes do not talk to Claude, so they do not need it.
+	env[KeyMode] = "listen"
+	if _, _, err := Load(Inputs{DotEnv: env}); err != nil {
+		t.Errorf("listen mode without a key: %v", err)
+	}
 }

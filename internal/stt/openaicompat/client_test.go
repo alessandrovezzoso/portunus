@@ -140,3 +140,23 @@ func TestNewValidates(t *testing.T) {
 		t.Errorf("url = %q", c.url)
 	}
 }
+
+func TestPing(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			t.Errorf("Ping called %s, want /health", r.URL.Path)
+		}
+	}))
+	defer up.Close()
+	if err := newClient(t, up).Ping(context.Background()); err != nil {
+		t.Errorf("Ping on a healthy server: %v", err)
+	}
+
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer down.Close()
+	if err := newClient(t, down).Ping(context.Background()); err == nil {
+		t.Error("Ping on a 503 must fail")
+	}
+}

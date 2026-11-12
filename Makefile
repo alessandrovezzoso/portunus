@@ -14,7 +14,7 @@ GOBUILD := CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)"
 
 COMPOSE := docker compose -f deploy/compose.yaml
 
-.PHONY: build build-linux-amd64 build-linux-arm64 check lint integration echo greet listen run tts-up tts-down stt-up stt-down clean
+.PHONY: build build-linux-amd64 build-linux-arm64 check lint integration echo greet listen agent run tts-up tts-down stt-up stt-down clean
 
 build:
 	$(GOBUILD) -o bin/$(BINARY) $(PKG)
@@ -53,6 +53,11 @@ greet: build
 # Transcripts appear only with PORTUNUS_LOG_LEVEL=debug.
 listen: build
 	./bin/$(BINARY) -mode listen
+
+# Milestone 3: the full conversation with Claude. Needs make tts-up, make
+# stt-up and ANTHROPIC_API_KEY in .env.
+agent: build
+	./bin/$(BINARY) -mode agent
 
 # The local speech services (deploy/compose.yaml), listening on 127.0.0.1.
 tts-up:

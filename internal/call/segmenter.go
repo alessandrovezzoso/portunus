@@ -140,6 +140,16 @@ func (s *segmenter) finish(cut bool) *utterance {
 	}
 }
 
+// reset forgets the utterance in progress and the pre-roll, as if the
+// segmenter had just been created. The ear calls it while the assistant is
+// talking, so nothing heard then leaks into the next utterance.
+func (s *segmenter) reset() {
+	s.inSpeech = false
+	s.pcm = s.pcm[:0]
+	s.pre = s.pre[:0]
+	s.start, s.lastVoiced, s.silent = 0, 0, 0
+}
+
 // remember keeps the last preRollSamples of idle audio.
 func (s *segmenter) remember(frame []int16) {
 	s.pre = append(s.pre, frame...)

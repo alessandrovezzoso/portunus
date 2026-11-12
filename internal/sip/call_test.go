@@ -3,6 +3,7 @@ package sip
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -103,5 +104,27 @@ func TestCountingReaderAndWriter(t *testing.T) {
 	_, _ = out.Write(frame(2))
 	if got := out.frames.Load(); got != 2 {
 		t.Errorf("frames out = %d, want 2", got)
+	}
+}
+
+func TestReady(t *testing.T) {
+	s := &Server{}
+	if err := s.ready(context.Background()); err != nil {
+		t.Errorf("no Ready function must mean ready, got %v", err)
+	}
+
+	s.opts.Ready = func(context.Context) error { return errors.New("STT down") }
+	if err := s.ready(context.Background()); err == nil {
+		t.Error("an error from Ready must refuse the call")
+	}
+
+	// Ready gets a deadline, so a slow check cannot keep the caller waiting.
+	s.opts.Ready = func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	start := time.Now()
+	if err := s.ready(context.Background()); err == nil || time.Since(start) > 2*readyTimeout {
+		t.Errorf("a stuck Ready returned %v after %v", err, time.Since(start))
 	}
 }

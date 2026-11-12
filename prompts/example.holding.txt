@@ -1,0 +1,7 @@
+# Holding phrases, one per line, said in rotation the moment the caller stops
+# talking, while the reply is prepared. Lines starting with # are ignored.
+# Keep them a little longer than two words: Kokoro sounds wrong on very
+# short utterances.
+Certo, un momento.
+Bene, un attimo per favore.
+Va bene, mi dia un momento.

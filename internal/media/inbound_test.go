@@ -79,3 +79,28 @@ func TestEncodeWAV(t *testing.T) {
 		t.Errorf("EncodeWAV =\n%x\nwant\n%x", got, want)
 	}
 }
+
+func TestTrimSilence(t *testing.T) {
+	// At 1 kHz: 100 ms of silence, 50 ms of sound, 200 ms of silence.
+	pcm := make([]int16, 350)
+	for i := 100; i < 150; i++ {
+		pcm[i] = 5000
+	}
+	got := TrimSilence(pcm, 1000)
+	// 20 ms are kept before the sound and 100 ms after it.
+	if len(got) != 20+50+100 || got[20] != 5000 || got[19] != 0 {
+		t.Errorf("trimmed to %d samples (first sound at %d), want 170 with the sound at 20", len(got), indexOfLoud(got))
+	}
+	if got := TrimSilence(make([]int16, 100), 1000); len(got) != 0 {
+		t.Errorf("all silence trimmed to %d samples, want none", len(got))
+	}
+}
+
+func indexOfLoud(pcm []int16) int {
+	for i, s := range pcm {
+		if s != 0 {
+			return i
+		}
+	}
+	return -1
+}

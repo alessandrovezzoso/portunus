@@ -1,0 +1,1 @@
+Buongiorno, [pause:0.1s] sono Portunus, [pause:0.1s] l'assistente automatico dell'ufficio. [pause:0.4s] In questo momento nessuno può rispondere di persona, [pause:0.1s] ma posso prendere un messaggio. [pause:0.3s] Come posso aiutarla?
