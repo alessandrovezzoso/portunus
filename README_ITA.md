@@ -24,6 +24,7 @@ quando non c'è nessun altro.*
 - [Cosa fa](#cosa-fa)
 - [Come funziona](#come-funziona)
 - [Requisiti](#requisiti)
+- [I server della voce: Kokoro e Whisper](#i-server-della-voce-kokoro-e-whisper)
 - [Avvio rapido](#avvio-rapido)
 - [Configurazione](#configurazione)
 - [Ottenere una chiave API di Claude](#ottenere-una-chiave-api-di-claude)
@@ -199,14 +200,145 @@ chiamata. Niente viene ricordato da una chiamata all'altra.
   Apple Silicon va bene per lo sviluppo.
 - **Go 1.27.4** o successivo, per compilare. Il binario è statico e non ha bisogno di
   niente di installato.
-- **Docker** con Compose, per Kokoro e Whisper. Whisper viene compilato sulla macchina che
-  lo usa, sfruttando tutte le istruzioni della sua CPU: compilatelo lì, non copiate mai
-  l'immagine.
+- **Docker** con Compose, per Kokoro e Whisper: come installarli e avviarli è spiegato in
+  [I server della voce](#i-server-della-voce-kokoro-e-whisper). Whisper viene compilato
+  sulla macchina che lo usa, sfruttando tutte le istruzioni della sua CPU: compilatelo lì,
+  non copiate mai l'immagine.
 - **CPU:** Whisper e Kokoro girano sulla CPU. Su un M3 Pro, Whisper impiega circa 2,5 s
   per frase e Kokoro va circa 9 volte più veloce del tempo reale. Misurate la VM prima di
   contarci.
 - **Una chiave API di Anthropic** per la modalità `agent` (vedi
   [sotto](#ottenere-una-chiave-api-di-claude)).
+
+## I server della voce: Kokoro e Whisper
+
+Portunus non sintetizza e non riconosce la voce da solo: lo fanno due server locali, in
+container Docker descritti in [`deploy/compose.yaml`](deploy/compose.yaml). Tutti e due
+ascoltano solo su `127.0.0.1`, quindi niente fuori dalla macchina può raggiungerli.
+
+| | Kokoro (sintesi vocale) | Whisper (riconoscimento vocale) |
+|---|---|---|
+| Software | [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI) v0.10.0, immagine già pronta per CPU, bloccata per digest | [whisper.cpp](https://github.com/ggml-org/whisper.cpp) v1.9.5, compilato in locale da [`deploy/whisper/Dockerfile`](deploy/whisper/Dockerfile) |
+| Modello | Kokoro-82M, voce italiana `if_sara` | large-v3-turbo, quantizzato q5_0 (574 MB), con impronta verificata |
+| Indirizzo | `http://127.0.0.1:8880` | `http://127.0.0.1:8890` |
+| Si avvia con | `make tts-up` | `make stt-up` |
+| Disco | circa 4,5 GB (l'immagine) | circa 1,3 GB (l'immagine, modello compreso), più la cache di compilazione |
+| Memoria | circa 1,3 GB | circa 0,7 GB a riposo, di più mentre trascrive |
+
+Le misure sono state prese sul Mac di sviluppo; sulla VM saranno simili.
+
+### 1. Installare Docker
+
+- **macOS (sviluppo):** Docker Desktop, da
+  [docker.com](https://docs.docker.com/desktop/setup/install/mac-install/) oppure con
+  Homebrew:
+
+  ```bash
+  brew install --cask docker-desktop
+  ```
+
+  Avviatelo una volta dalle Applicazioni. In Settings → Resources dategli almeno 4 GB di
+  memoria e tutte le CPU che potete: Whisper usa 8 thread. Secondo le condizioni di Docker
+  al momento in cui scriviamo, Docker Desktop è gratuito per uso personale, per
+  l'istruzione e per le aziende con meno di 250 dipendenti e meno di 10 milioni di dollari
+  di fatturato annuo; [Colima](https://github.com/abiosoft/colima) (`brew install colima`)
+  è un'alternativa open source.
+- **Linux (la VM dell'ufficio):** Docker Engine con il plugin Compose, dal repository di
+  Docker stesso, seguendo [la guida ufficiale](https://docs.docker.com/engine/install/) per
+  la vostra distribuzione. Poi fatelo partire all'avvio:
+
+  ```bash
+  sudo systemctl enable --now docker
+  ```
+
+  Per usare `docker` senza `sudo`, aggiungete il vostro utente al gruppo `docker` (`sudo
+  usermod -aG docker $USER`, poi rientrate). Quel gruppo vale quanto root: datelo solo a
+  chi amministra la VM.
+
+Controllate che Compose ci sia:
+
+```bash
+docker compose version
+```
+
+### 2. Avviarli
+
+Dalla cartella del repository:
+
+```bash
+make tts-up
+```
+
+La prima volta scarica l'immagine di Kokoro (circa 4,5 GB). Dopo ogni avvio, la prima
+sintesi è più lenta delle successive.
+
+```bash
+make stt-up
+```
+
+La prima volta compila whisper.cpp per questa CPU e scarica il modello (574 MB),
+controllandone lo SHA-256: ci vogliono diversi minuti. Le volte successive riusa
+l'immagine. Se nel frattempo il tag di whisper.cpp è stato spostato su un altro commit, la
+compilazione si ferma apposta.
+
+Tutti e due i container hanno `restart: unless-stopped`: ripartono da soli ogni volta che
+parte Docker (dopo un riavvio, per esempio), finché non li fermate con `make tts-down` e
+`make stt-down`.
+
+### 3. Controllarli
+
+```bash
+curl -s http://127.0.0.1:8880/v1/models   # Kokoro: un elenco JSON di modelli
+curl -s http://127.0.0.1:8890/health       # Whisper: {"status":"ok"}
+```
+
+Dall'inizio alla fine: Kokoro dice una frase e Whisper la riscrive:
+
+```bash
+curl -s http://127.0.0.1:8880/v1/audio/speech -H 'Content-Type: application/json' \
+  -d '{"model":"kokoro","voice":"if_sara","input":"Buongiorno, la sintesi vocale funziona.","response_format":"wav"}' \
+  -o prova.wav
+```
+
+```bash
+curl -s http://127.0.0.1:8890/v1/audio/transcriptions -F file=@prova.wav -F language=it -F response_format=json
+```
+
+Il secondo comando dovrebbe stampare `{"text":" Buongiorno, la sintesi vocale
+funziona.\n"}`. Su macOS, `afplay prova.wav` vi fa sentire la voce.
+
+Portunus fa da solo controlli simili: all'avvio (il log scrive `TTS server ready` e `STT
+server ready`, con il tempo impiegato) e, in modalità `agent`, prima di rispondere a ogni
+chiamata.
+
+### 4. Tutti i giorni
+
+| Cosa | Comando |
+|---|---|
+| Sono accesi? | `docker compose -f deploy/compose.yaml ps` |
+| I loro log | `docker compose -f deploy/compose.yaml logs -f kokoro` (oppure `whisper`) |
+| Fermarli | `make tts-down`, `make stt-down` |
+| Riavviarli | `make tts-up`, `make stt-up` |
+| Eliminare i container | `docker compose -f deploy/compose.yaml down` |
+| Eliminare container e immagini | `docker compose -f deploy/compose.yaml down --rmi all` |
+
+### 5. Regolazioni e aggiornamenti
+
+- **I thread di Whisper.** `--threads 8` in `compose.yaml` va bene per gli 11 core che
+  Docker ha sul Mac di sviluppo. Sulla VM, impostatelo al numero di core meno uno o due
+  (anche Portunus e Kokoro hanno bisogno di CPU), rilanciate `make stt-up` e confrontate
+  `stt_ms` nel log.
+- **La finestra di Whisper.** `--audio-ctx 512` (circa 10 s) e
+  `PORTUNUS_STT_MAX_UTTERANCE` (9,5 s) vanno insieme: se cambiate uno, cambiate anche
+  l'altro, altrimenti la fine delle frasi lunghe si perde senza avvisi.
+- **Gli aggiornamenti si fanno apposta.** Tag e digest di Kokoro stanno in
+  `compose.yaml`; versione e commit di whisper.cpp, file e impronta del modello, nel
+  Dockerfile. Dopo un aggiornamento lanciate `make integration` e ascoltate una chiamata:
+  una nuova versione può cambiare la voce o la trascrizione.
+- **Altri server.** Qualsiasi server con la stessa API in stile OpenAI può sostituire l'uno
+  o l'altro: basta puntarci `PORTUNUS_TTS_URL` o `PORTUNUS_STT_URL`. Un server fuori dalla
+  macchina o dalla rete locale produce un avviso all'avvio, perché il testo o la voce che
+  gli arrivano escono dall'ufficio.
 
 ## Avvio rapido
 
